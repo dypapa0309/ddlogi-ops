@@ -10,7 +10,8 @@ import express from "express";
 import "dotenv/config";
 import { createClient } from "@supabase/supabase-js";
 
-import jobsRouter from "./routes/jobs.js"; // ✅ 조회 API 라우터
+import jobsRouter from "./routes/jobs/index.js"; // ✅ 조회 API 라우터
+
 
 /* =========================
    App
