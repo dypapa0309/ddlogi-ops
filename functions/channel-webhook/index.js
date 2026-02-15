@@ -1,28 +1,16 @@
-// index.js (ESM / Node 20+)
+// functions/channel-webhook/index.js (ESM / Node 20+)
 // ✅ ChannelTalk Webhook 수신 → webhook_logs 저장(항상) → chat_id 기준 누적판단 → jobs upsert
 // ✅ statuses: draft / quoted / pending_confirm / confirmed / canceled
-// ✅ Render 로그: aggregatedStatus / messageId / chatId / preview(마스킹)
-// ✅ 포함사항(통합):
-// 1) confirmed_at 최초값 보존
-// 2) 입금 strong/weak 분리 + 부정문 필터
-// 3) canceled 상태 추가 (취소는 예외적으로 상태 전이 허용)
-// 4) 견적문 마커(DDLOGI_QUOTE_V1) 지원 + 기존 키워드 fallback
-// 5) person_type 엄격 분리(user/bot만 판정), others는 판정 제외
-// 6) 최신값 우선 추출(로그 최신→과거 스캔)
-// 7) messageId 중복 저장 방지(서버단 멱등, + DB unique 있으면 더 좋음)
-// 8) 웹훅 보호 토큰 헤더(X-DDLOGI-TOKEN) 검증 (env: DDLOGI_WEBHOOK_TOKEN)
-// 9) 로그 출력 마스킹(전화번호)
-// 10) (선택) DB unique(message_id) 있으면 insert 충돌에도 안전하도록 방어
-// 11) hasQuote 보강: limit 확장(기본 120) + 견적문이 앞에 있어도 인식
-// 12) 상태 전이 정책: downgrade 방지 + canceled 예외 처리
-// ✅ 보강(추가):
-// A) 이름 loose 추출(“이도윤 입금 완료”)
-// B) jobs upsert 시 null로 기존값 덮어쓰기 방지(기존값 유지)
-// C) 금액 추출 loose(“총 예상 금액은 146,068원…”)
+// ✅ 추가(운영용):
+// - GET /jobs, GET /jobs/:chatId (ADMIN_API_TOKEN Bearer)
+// - CORS (ADMIN_ALLOWED_ORIGINS만 허용) + OPTIONS 프리플라이트 처리
+// - /jobs 간단 rate limit (외부 라이브러리 없이)
 
 import express from "express";
 import "dotenv/config";
 import { createClient } from "@supabase/supabase-js";
+
+import jobsRouter from "./routes/jobs.js"; // ✅ 조회 API 라우터
 
 /* =========================
    App
@@ -47,9 +35,86 @@ const supabase = hasSupabaseEnv
   : null;
 
 /* =========================
-   Webhook 보호 토큰 (권장)
+   Tokens
 ========================= */
-const WEBHOOK_TOKEN = process.env.DDLOGI_WEBHOOK_TOKEN || "";
+const WEBHOOK_TOKEN = process.env.DDLOGI_WEBHOOK_TOKEN || ""; // 웹훅 보호(선택)
+const ADMIN_ALLOWED_ORIGINS = String(process.env.ADMIN_ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+/* =========================
+   CORS (Netlify admin only)
+   - Authorization 헤더 때문에 OPTIONS 프리플라이트 반드시 처리 필요
+   - ✅ 허용 Origin 아니면 OPTIONS도 403 (브라우저 오동작 방지)
+========================= */
+function isAllowedOrigin(origin) {
+  if (!origin) return false;
+  if (ADMIN_ALLOWED_ORIGINS.length === 0) return true; // dev 편의 (운영에서는 설정 권장)
+  return ADMIN_ALLOWED_ORIGINS.includes(origin);
+}
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  const allowed = origin && isAllowedOrigin(origin);
+
+  if (allowed) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-DDLOGI-TOKEN");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
+    res.setHeader("Access-Control-Max-Age", "600");
+  }
+
+  // ✅ 프리플라이트 처리 (허용 origin만 204)
+  if (req.method === "OPTIONS") {
+    if (allowed) return res.status(204).end();
+    return res.status(403).json({ error: "CORS forbidden" });
+  }
+
+  next();
+});
+
+/* =========================
+   Simple Rate Limit (for /jobs only)
+   - IP 기준, 분당 120회 기본
+   - ✅ OPTIONS는 제외 (프리플라이트 막히면 프론트가 죽음)
+========================= */
+const RL_WINDOW_MS = 60 * 1000;
+const RL_MAX = parseInt(process.env.JOBS_RL_MAX || "120", 10);
+const rlMap = new Map(); // key: ip, value: { ts, count }
+
+function getClientIp(req) {
+  // Render 등 프록시 환경 고려
+  const xf = (req.headers["x-forwarded-for"] || "").toString();
+  if (xf) return xf.split(",")[0].trim();
+  return req.ip || req.connection?.remoteAddress || "unknown";
+}
+
+function rateLimitJobs(req, res, next) {
+  if (req.method === "OPTIONS") return next();
+  if (!req.path.startsWith("/jobs")) return next();
+
+  const ip = getClientIp(req);
+  const now = Date.now();
+  const rec = rlMap.get(ip);
+
+  if (!rec || now - rec.ts > RL_WINDOW_MS) {
+    rlMap.set(ip, { ts: now, count: 1 });
+    return next();
+  }
+
+  rec.count += 1;
+  rlMap.set(ip, rec);
+
+  if (rec.count > RL_MAX) {
+    return res.status(429).json({ error: "Too many requests" });
+  }
+
+  next();
+}
+app.use(rateLimitJobs);
 
 /* =========================
    Utils
@@ -79,15 +144,13 @@ function maskPhoneInText(text) {
 }
 
 function extractName(text) {
-  // "이름: 홍길동" / "이름 홍길동"
   const m = String(text || "").match(/이름[:\s]*([가-힣]{2,4})/);
   return m ? m[1] : null;
 }
 
-// ✅ 보강: 라벨 없는 이름 (예: "이도윤 입금 완료", "홍길동입니다")
+// ✅ 라벨 없는 이름 (예: "이도윤 입금 완료", "홍길동입니다")
 function extractNameLoose(text) {
   const t = String(text || "").trim();
-  // "첫 토큰(2~4자 한글) + 특정 후행 키워드" 형태만 제한적으로 인정(오탐 방지)
   const m = t.match(
     /^([가-힣]{2,4})\s*(?:님|입니다|이에요|요|입금|입금완료|입금 완료|송금|이체|완료|완료했|완료했습니다)\b/
   );
@@ -104,7 +167,6 @@ function extractAddressLine(text, label) {
 }
 
 function extractMoney(text, label) {
-  // "[예상금액] ₩234,000" 형태를 우선
   const safe = escapeRegExp(label);
   const re = new RegExp(`\\[${safe}\\]\\s*₩?([0-9,]+)`, "i");
   const m = String(text || "").match(re);
@@ -191,7 +253,6 @@ function isQuoteBlock(text) {
   const t = String(text || "");
   if (t.includes(QUOTE_MARKER)) return true;
 
-  // 기존 키워드 조합
   const legacy =
     t.includes("이사 방식") &&
     t.includes("차량") &&
@@ -202,7 +263,7 @@ function isQuoteBlock(text) {
 
   if (legacy) return true;
 
-  // ✅ 보강: 봇 문장형 견적(“총 예상 금액… 예약금… 잔금… 진행 원하시면 …”)
+  // ✅ 보강: 봇 문장형 견적
   const naturalQuote =
     (t.includes("총 예상 금액") || t.includes("예상 금액")) &&
     (t.includes("예약금") || t.includes("20%")) &&
@@ -221,7 +282,7 @@ function getStatusPriority(status) {
     quoted: 1,
     pending_confirm: 2,
     confirmed: 3,
-    canceled: 2, // 참고값(실제는 예외 처리)
+    canceled: 2,
   };
   return map[status] ?? 0;
 }
@@ -335,7 +396,6 @@ function extractLatestFactsFromLogs(logs) {
    누적판단
 ========================= */
 function aggregateFromLogs(logs) {
-  // person_type 엄격 분리: 판정 텍스트는 bot/user만
   const botTexts = logs
     .filter((x) => x.person_type === "bot")
     .map((x) => x.plain_text || x.text || "")
@@ -500,12 +560,9 @@ async function saveWebhookLog({
     payload,
   });
 
-  // ✅ UNIQUE(message_id) 걸려있으면 레이스에서 여기로 떨어질 수 있음 → 무시
   if (error) {
     const msg = String(error.message || "");
-    if (msg.toLowerCase().includes("duplicate") || msg.toLowerCase().includes("unique")) {
-      return;
-    }
+    if (msg.toLowerCase().includes("duplicate") || msg.toLowerCase().includes("unique")) return;
     console.warn("⚠️ webhook_logs 저장 실패:", error.message);
   }
 }
@@ -543,7 +600,7 @@ async function getExistingJob(chatId) {
   return data || null;
 }
 
-// ✅ 보강: 기존값 유지용 merge
+// ✅ 기존값 유지용 merge
 function keepExisting(existingValue, newValue) {
   return newValue != null && String(newValue).trim() !== "" ? newValue : (existingValue ?? null);
 }
@@ -551,7 +608,6 @@ function keepExisting(existingValue, newValue) {
 async function upsertJobByChat({ chatId, lastPayload, lastMessageId, agg, mergedText, existingJob }) {
   if (!supabase) return null;
 
-  // ✅ 보강: agg가 못 잡은 값은 기존값 유지
   const customer_name = keepExisting(existingJob?.customer_name, agg.name);
   const customer_phone = keepExisting(existingJob?.customer_phone, agg.phone);
   const from_address = keepExisting(existingJob?.from_address, agg.fromAddress);
@@ -605,6 +661,13 @@ async function upsertJobByChat({ chatId, lastPayload, lastMessageId, agg, merged
 app.get("/", (req, res) => {
   res.json({ ok: true, service: "ddlogi-channel-webhook", time: new Date().toISOString() });
 });
+
+// ✅ 조회용 API 라우터 등록 (/jobs, /jobs/:chatId)
+if (supabase) {
+  app.use("/jobs", jobsRouter({ supabase }));
+} else {
+  console.warn("⚠️ Supabase client missing: /jobs API disabled");
+}
 
 app.post("/webhook/channel", async (req, res) => {
   // 웹훅 보호 토큰
@@ -710,4 +773,9 @@ app.post("/webhook/channel", async (req, res) => {
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`🚀 Channel Webhook Server Running on port ${PORT}`);
+  if (ADMIN_ALLOWED_ORIGINS.length > 0) {
+    console.log("✅ ADMIN_ALLOWED_ORIGINS:", ADMIN_ALLOWED_ORIGINS.join(", "));
+  } else {
+    console.log("⚠️ ADMIN_ALLOWED_ORIGINS not set (CORS allows all origins in dev).");
+  }
 });
