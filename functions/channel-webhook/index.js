@@ -190,16 +190,36 @@ async function saveWebhookLog({ payload, text, status }) {
 
   const messageId = extractMessageId(payload);
 
+  // 🔥 우리가 payload에서 직접 꺼낼 값들
+  const chatId =
+    payload?.entity?.chatId ||
+    payload?.refers?.userChat?.id ||
+    null;
+
+  const personType =
+    payload?.entity?.personType || null;
+
+  const userId =
+    payload?.refers?.user?.id || null;
+
+  const plainText =
+    payload?.entity?.plainText || null;
+
   const { error } = await supabase.from("webhook_logs").insert({
     source: "channeltalk",
     message_id: messageId,
     status,
     text: text || null,
+    plain_text: plainText,
+    chat_id: chatId,
+    person_type: personType,
+    user_id: userId,
     payload,
   });
 
   if (error) console.warn("⚠️ webhook_logs 저장 실패:", error.message);
 }
+
 
 // ✅ confirmed 시점에 jobs 저장
 async function saveConfirmedJob({ payload, text }) {
