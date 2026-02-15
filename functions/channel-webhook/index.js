@@ -307,6 +307,4 @@ app.listen(PORT, () => {
   console.log(`🚀 Channel Webhook Server Running: http://localhost:${PORT}`);
 });
 
-await supabase.from("webhook_logs").insert({
-  payload
-});
+
