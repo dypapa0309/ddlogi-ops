@@ -582,10 +582,14 @@ app.get("/", (req, res) => {
 
 // ✅ 중요: adminToken 전달
 if (supabase) {
-  app.use("/jobs", jobsRouter({ supabase, adminToken: ADMIN_API_TOKEN }));
+  app.use("/jobs", jobsRouter({ 
+    supabase, 
+    adminToken: ADMIN_API_TOKEN 
+  }));
 } else {
   console.warn("⚠️ Supabase client missing: /jobs API disabled");
 }
+
 
 app.post("/webhook/channel", async (req, res) => {
   if (WEBHOOK_TOKEN) {
