@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>DDLOGI OPS - Jobs Test</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Pretendard,sans-serif;margin:20px;background:#0b1220;color:#fff;}
+    input,button{padding:10px;border-radius:10px;border:1px solid #223; background:#111827;color:#fff;}
+    button{cursor:pointer;}
+    pre{white-space:pre-wrap;background:#111827;padding:14px;border-radius:14px;border:1px solid #223;}
+    .row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;}
+    .hint{color:#94a3b8;font-size:13px;margin:6px 0 14px;}
+  </style>
+</head>
+<body>
+  <h1>DDLOGI OPS /jobs 테스트</h1>
+  <div class="hint">
+    Render: https://ddlogi-ops.onrender.com <br/>
+    Authorization: Bearer (ADMIN_API_TOKEN)
+  </div>
+
+  <div class="row">
+    <input id="token" type="password" placeholder="ADMIN_API_TOKEN 붙여넣기" style="min-width:320px" />
+    <button id="btnList">GET /jobs</button>
+    <button id="btnOne">GET /jobs/:chatId</button>
+  </div>
+
+  <div class="row">
+    <input id="chatId" placeholder="chatId 입력 (옵션)" style="min-width:320px" />
+    <input id="q" placeholder="q (검색어, 옵션)" />
+    <input id="status" placeholder="status (옵션)" />
+    <input id="page" placeholder="page" value="1" style="width:80px" />
+    <input id="limit" placeholder="limit" value="20" style="width:80px" />
+  </div>
+
+  <pre id="out">ready.</pre>
+
+  <script type="module" src="/admin/test.js"></script>
+</body>
+</html>
