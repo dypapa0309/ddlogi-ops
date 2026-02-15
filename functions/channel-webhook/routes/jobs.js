@@ -4,22 +4,52 @@ import { Router } from "express";
 export default function jobsRouter({ supabase, adminToken }) {
   const router = Router();
 
-  function requireAdmin(req, res, next) {
-    const h = String(req.headers.authorization || "");
-    const token = h.startsWith("Bearer ") ? h.slice(7).trim() : "";
-
-    if (!adminToken) {
-      return res.status(500).json({ error: "ADMIN_API_TOKEN_MISSING" });
-    }
-    if (!token || token !== adminToken) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-    next();
-  }
-
   function requireSupabase(req, res, next) {
     if (!supabase) return res.status(503).json({ error: "SUPABASE_NOT_CONFIGURED" });
     next();
+  }
+
+  // ✅ ADMIN 인증:
+  // 1) (옵션) 레거시: Bearer 토큰이 adminToken과 같으면 통과
+  // 2) Supabase 세션 JWT면: supabase.auth.getUser(jwt)로 유저 확인 → profiles.role=admin 확인
+  async function requireAdmin(req, res, next) {
+    try {
+      const h = String(req.headers.authorization || "");
+      const token = h.startsWith("Bearer ") ? h.slice(7).trim() : "";
+
+      if (!token) return res.status(401).json({ error: "Unauthorized" });
+
+      // 1) 레거시 토큰 병행 (원하면 유지)
+      if (adminToken && token === adminToken) return next();
+
+      // 2) Supabase JWT 검증
+      // ⚠️ 이 supabase 클라이언트는 서버에서 생성된 서비스키 권한이어야 안정적임
+      const { data: userData, error: userErr } = await supabase.auth.getUser(token);
+      if (userErr || !userData?.user?.id) {
+        return res.status(401).json({ error: "InvalidSessionToken" });
+      }
+
+      const userId = userData.user.id;
+
+      // profiles.role 체크
+      const { data: profile, error: profErr } = await supabase
+        .from("profiles")
+        .select("role")
+        .eq("user_id", userId)
+        .single();
+
+      if (profErr || !profile) {
+        return res.status(403).json({ error: "ProfileNotFound" });
+      }
+      if (profile.role !== "admin") {
+        return res.status(403).json({ error: "AdminOnly" });
+      }
+
+      req.adminUserId = userId;
+      next();
+    } catch (e) {
+      return res.status(500).json({ error: String(e?.message || e) });
+    }
   }
 
   // 목록
