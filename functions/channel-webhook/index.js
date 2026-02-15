@@ -1,17 +1,14 @@
 // functions/channel-webhook/index.js (ESM / Node 20+)
-// ✅ ChannelTalk Webhook 수신 → webhook_logs 저장(항상) → chat_id 기준 누적판단 → jobs upsert
-// ✅ statuses: draft / quoted / pending_confirm / confirmed / canceled
-// ✅ 추가(운영용):
-// - GET /jobs, GET /jobs/:chatId (ADMIN_API_TOKEN Bearer)
-// - CORS (ADMIN_ALLOWED_ORIGINS만 허용) + OPTIONS 프리플라이트 처리
-// - /jobs 간단 rate limit (외부 라이브러리 없이)
+// ChannelTalk Webhook 수신 → webhook_logs 저장(항상) → chat_id 기준 누적판단 → jobs upsert
+// statuses: draft / quoted / pending_confirm / confirmed / canceled
+// 운영용: GET /jobs, GET /jobs/:chatId (ADMIN_API_TOKEN Bearer)
+// CORS + OPTIONS + /jobs rate limit
 
 import express from "express";
 import "dotenv/config";
 import { createClient } from "@supabase/supabase-js";
 
-import jobsRouter from "./routes/jobs/index.js"; // ✅ 조회 API 라우터
-
+import jobsRouter from "./routes/jobs.js"; // ✅ 파일 단일화
 
 /* =========================
    App
@@ -38,8 +35,8 @@ const supabase = hasSupabaseEnv
 /* =========================
    Tokens
 ========================= */
-const WEBHOOK_TOKEN = process.env.DDLOGI_WEBHOOK_TOKEN || ""; // 웹훅 보호(선택)
-const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN || "";
+const WEBHOOK_TOKEN = process.env.DDLOGI_WEBHOOK_TOKEN || ""; // webhook 보호(선택)
+const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN || "";     // ✅ /jobs 보호 토큰
 
 const ADMIN_ALLOWED_ORIGINS = String(process.env.ADMIN_ALLOWED_ORIGINS || "")
   .split(",")
@@ -47,13 +44,11 @@ const ADMIN_ALLOWED_ORIGINS = String(process.env.ADMIN_ALLOWED_ORIGINS || "")
   .filter(Boolean);
 
 /* =========================
-   CORS (Netlify admin only)
-   - Authorization 헤더 때문에 OPTIONS 프리플라이트 반드시 처리 필요
-   - ✅ 허용 Origin 아니면 OPTIONS도 403 (브라우저 오동작 방지)
+   CORS (Admin only)
 ========================= */
 function isAllowedOrigin(origin) {
   if (!origin) return false;
-  if (ADMIN_ALLOWED_ORIGINS.length === 0) return true; // dev 편의 (운영에서는 설정 권장)
+  if (ADMIN_ALLOWED_ORIGINS.length === 0) return true; // dev 편의
   return ADMIN_ALLOWED_ORIGINS.includes(origin);
 }
 
@@ -73,7 +68,6 @@ app.use((req, res, next) => {
     res.setHeader("Access-Control-Max-Age", "600");
   }
 
-  // ✅ 프리플라이트 처리 (허용 origin만 204)
   if (req.method === "OPTIONS") {
     if (allowed) return res.status(204).end();
     return res.status(403).json({ error: "CORS forbidden" });
@@ -83,16 +77,13 @@ app.use((req, res, next) => {
 });
 
 /* =========================
-   Simple Rate Limit (for /jobs only)
-   - IP 기준, 분당 120회 기본
-   - ✅ OPTIONS는 제외 (프리플라이트 막히면 프론트가 죽음)
+   Rate Limit (for /jobs only)
 ========================= */
 const RL_WINDOW_MS = 60 * 1000;
 const RL_MAX = parseInt(process.env.JOBS_RL_MAX || "120", 10);
-const rlMap = new Map(); // key: ip, value: { ts, count }
+const rlMap = new Map();
 
 function getClientIp(req) {
-  // Render 등 프록시 환경 고려
   const xf = (req.headers["x-forwarded-for"] || "").toString();
   if (xf) return xf.split(",")[0].trim();
   return req.ip || req.connection?.remoteAddress || "unknown";
@@ -154,7 +145,6 @@ function extractName(text) {
   return m ? m[1] : null;
 }
 
-// ✅ 라벨 없는 이름 (예: "이도윤 입금 완료", "홍길동입니다")
 function extractNameLoose(text) {
   const t = String(text || "").trim();
   const m = t.match(
@@ -181,7 +171,6 @@ function extractMoney(text, label) {
   return Number.isFinite(n) ? n : null;
 }
 
-// ✅ 보강: "총 예상 금액은 146,068원", "예약금 20%는 29,214원", "잔금은 116,854원"
 function extractMoneyLoose(text, kind) {
   const t = String(text || "");
   const patterns = {
@@ -211,7 +200,6 @@ function extractMoneyLoose(text, kind) {
   return null;
 }
 
-// 고객이 라벨 없이 "출발지 ... 도착지 ..."로 보낸 경우
 function extractFromToLoose(text) {
   const t = String(text || "");
   const from = t.match(/출발지\s*([^\n]+?)(?=\s*도착지|$)/);
@@ -248,7 +236,7 @@ function extractUserId(payload) {
 }
 
 function extractPersonType(payload) {
-  return payload?.entity?.personType || null; // "user" | "bot" | ...
+  return payload?.entity?.personType || null;
 }
 
 /* =========================
@@ -266,37 +254,26 @@ function isQuoteBlock(text) {
     t.includes("출발지") &&
     t.includes("도착지") &&
     (t.includes("[예상금액]") || t.includes("예상금액"));
-
   if (legacy) return true;
 
-  // ✅ 보강: 봇 문장형 견적
   const naturalQuote =
     (t.includes("총 예상 금액") || t.includes("예상 금액")) &&
     (t.includes("예약금") || t.includes("20%")) &&
     (t.includes("잔금") || t.includes("80%")) &&
-    (t.includes("그대로 진행") ||
-      t.includes("수정/추가") ||
-      t.includes("진행을 원하시면"));
-
+    (t.includes("그대로 진행") || t.includes("수정/추가") || t.includes("진행을 원하시면"));
   return naturalQuote;
 }
 
 /* =========================
-   Status priority (downgrade 방지)
+   Status priority
 ========================= */
 function getStatusPriority(status) {
-  const map = {
-    draft: 0,
-    quoted: 1,
-    pending_confirm: 2,
-    confirmed: 3,
-    canceled: 2,
-  };
+  const map = { draft: 0, quoted: 1, pending_confirm: 2, confirmed: 3, canceled: 2 };
   return map[status] ?? 0;
 }
 
 /* =========================
-   최신값 우선 추출 (logs 최신→과거)
+   최신값 우선 추출
 ========================= */
 function extractLatestFactsFromLogs(logs) {
   let latest = {
@@ -316,84 +293,23 @@ function extractLatestFactsFromLogs(logs) {
     hasCancel: false,
   };
 
-  const cancelKeywords = [
-    "취소",
-    "취소할게",
-    "취소하겠",
-    "취소합니다",
-    "예약 취소",
-    "진행 취소",
-  ];
-  const proceedKeywords = [
-    "그대로 진행",
-    "네 진행",
-    "진행할게요",
-    "진행하겠습니다",
-    "확정",
-    "예약",
-    "진행 부탁",
-    "부탁드립니다",
-  ];
-  const proceedNegKeywords = [
-    "취소",
-    "보류",
-    "잠시",
-    "다음에",
-    "나중에",
-    "진행 안",
-    "안 할",
-    "중단",
-  ];
+  const cancelKeywords = ["취소", "취소할게", "취소하겠", "취소합니다", "예약 취소", "진행 취소"];
+  const proceedKeywords = ["그대로 진행", "네 진행", "진행할게요", "진행하겠습니다", "확정", "예약", "진행 부탁", "부탁드립니다"];
+  const proceedNegKeywords = ["취소", "보류", "잠시", "다음에", "나중에", "진행 안", "안 할", "중단"];
 
-  const depositStrong = [
-    "입금완료",
-    "입금 완료",
-    "송금완료",
-    "송금 완료",
-    "이체완료",
-    "이체 완료",
-    "보냈어요",
-    "보냈습니다",
-    "송금했",
-    "이체했",
-    "입금 했",
-    "입금했습니다",
-  ];
-  const depositWeak = [
-    "입금",
-    "송금",
-    "이체",
-    "보낼게요",
-    "입금할게요",
-    "입금 예정",
-    "송금 예정",
-    "이체 예정",
-  ];
-  const depositNeg = [
-    "미입금",
-    "입금 전",
-    "입금전",
-    "아직 입금",
-    "아직 안",
-    "안 했",
-    "못했",
-    "보류",
-    "나중에 입금",
-    "입금 못",
-    "입금 안",
-  ];
+  const depositStrong = ["입금완료", "입금 완료", "송금완료", "송금 완료", "이체완료", "이체 완료", "보냈어요", "보냈습니다", "송금했", "이체했", "입금 했", "입금했습니다"];
+  const depositWeak = ["입금", "송금", "이체", "보낼게요", "입금할게요", "입금 예정", "송금 예정", "이체 예정"];
+  const depositNeg = ["미입금", "입금 전", "입금전", "아직 입금", "아직 안", "안 했", "못했", "보류", "나중에 입금", "입금 못", "입금 안"];
 
   for (const row of logs) {
     const pt = row.person_type;
     const txt = String(row.plain_text || row.text || "").trim();
     if (!txt) continue;
 
-    // 견적문 인식(bot/user 모두 체크)
     if (!latest.hasQuote && (pt === "bot" || pt === "user") && isQuoteBlock(txt)) {
       latest.hasQuote = true;
     }
 
-    // 금액은 bot에서 최신값 우선
     if (pt === "bot") {
       if (latest.quoteAmount == null) {
         const v = extractMoney(txt, "예상금액") ?? extractMoneyLoose(txt, "quote");
@@ -415,7 +331,6 @@ function extractLatestFactsFromLogs(logs) {
       }
     }
 
-    // 고객 의사/정보는 user에서만 판정
     if (pt !== "user") continue;
 
     if (!latest.hasCancel && containsKeyword(txt, cancelKeywords)) latest.hasCancel = true;
@@ -423,10 +338,8 @@ function extractLatestFactsFromLogs(logs) {
     if (!latest.hasProceed && containsKeyword(txt, proceedKeywords)) latest.hasProceed = true;
     if (!latest.negProceed && containsKeyword(txt, proceedNegKeywords)) latest.negProceed = true;
 
-    if (!latest.hasDepositStrong && containsKeyword(txt, depositStrong))
-      latest.hasDepositStrong = true;
-    if (!latest.hasDepositWeak && containsKeyword(txt, depositWeak))
-      latest.hasDepositWeak = true;
+    if (!latest.hasDepositStrong && containsKeyword(txt, depositStrong)) latest.hasDepositStrong = true;
+    if (!latest.hasDepositWeak && containsKeyword(txt, depositWeak)) latest.hasDepositWeak = true;
     if (!latest.negDeposit && containsKeyword(txt, depositNeg)) latest.negDeposit = true;
 
     if (!latest.phone) {
@@ -497,8 +410,7 @@ function aggregateFromLogs(logs) {
 
   const hasQuote = facts.hasQuote || botTexts.some((t) => isQuoteBlock(t));
 
-  const quoteAmount =
-    facts.quoteAmount ?? (extractMoney(allBot, "예상금액") ?? extractMoneyLoose(allBot, "quote"));
+  const quoteAmount = facts.quoteAmount ?? (extractMoney(allBot, "예상금액") ?? extractMoneyLoose(allBot, "quote"));
   const depositAmount =
     facts.depositAmount ??
     (extractMoney(allBot, "예약금(20%)") ??
@@ -517,74 +429,22 @@ function aggregateFromLogs(logs) {
   const hasCancel = facts.hasCancel;
 
   if (!hasQuote) {
-    return {
-      status: "draft",
-      reason: "no_quote_block_in_chat",
-      phone,
-      name,
-      fromAddress,
-      toAddress,
-      quoteAmount,
-      depositAmount,
-      balanceAmount,
-    };
+    return { status: "draft", reason: "no_quote_block_in_chat", phone, name, fromAddress, toAddress, quoteAmount, depositAmount, balanceAmount };
   }
 
   if (hasCancel) {
-    return {
-      status: "canceled",
-      reason: "cancel_intent (chat aggregated)",
-      phone,
-      name,
-      fromAddress,
-      toAddress,
-      quoteAmount,
-      depositAmount,
-      balanceAmount,
-    };
+    return { status: "canceled", reason: "cancel_intent (chat aggregated)", phone, name, fromAddress, toAddress, quoteAmount, depositAmount, balanceAmount };
   }
 
   if (hasDepositStrong && phone && fromAddress && toAddress) {
-    return {
-      status: "confirmed",
-      reason: "deposit_strong+phone+from/to (chat aggregated)",
-      phone,
-      name,
-      fromAddress,
-      toAddress,
-      quoteAmount,
-      depositAmount,
-      balanceAmount,
-    };
+    return { status: "confirmed", reason: "deposit_strong+phone+from/to (chat aggregated)", phone, name, fromAddress, toAddress, quoteAmount, depositAmount, balanceAmount };
   }
 
   if (hasProceed || hasDepositWeak) {
-    return {
-      status: "pending_confirm",
-      reason: hasProceed
-        ? "proceed_intent (chat aggregated)"
-        : "deposit_weak_intent (chat aggregated)",
-      phone,
-      name,
-      fromAddress,
-      toAddress,
-      quoteAmount,
-      depositAmount,
-      balanceAmount,
-    };
+    return { status: "pending_confirm", reason: hasProceed ? "proceed_intent (chat aggregated)" : "deposit_weak_intent (chat aggregated)", phone, name, fromAddress, toAddress, quoteAmount, depositAmount, balanceAmount };
   }
 
-  return {
-    status: "quoted",
-    reason: "quote_exists_only",
-    phone,
-    name,
-    fromAddress,
-    toAddress,
-    quoteAmount,
-    depositAmount,
-    balanceAmount,
-  };
+  return { status: "quoted", reason: "quote_exists_only", phone, name, fromAddress, toAddress, quoteAmount, depositAmount, balanceAmount };
 }
 
 /* =========================
@@ -592,13 +452,11 @@ function aggregateFromLogs(logs) {
 ========================= */
 async function webhookLogExists(messageId) {
   if (!supabase || !messageId) return false;
-
   const { data, error } = await supabase
     .from("webhook_logs")
     .select("id")
     .eq("message_id", messageId)
     .limit(1);
-
   if (error) return false;
   return (data || []).length > 0;
 }
@@ -632,7 +490,6 @@ async function saveWebhookLog({ payload, messageId, status, text, chatId, person
 
 async function fetchRecentLogsByChatId(chatId, limit = 120) {
   if (!supabase || !chatId) return [];
-
   const { data, error } = await supabase
     .from("webhook_logs")
     .select("created_at, message_id, status, text, plain_text, chat_id, person_type, user_id")
@@ -652,9 +509,7 @@ async function getExistingJob(chatId) {
 
   const { data, error } = await supabase
     .from("jobs")
-    .select(
-      "id, status, confirmed_at, customer_name, customer_phone, from_address, to_address, quote_amount, deposit_amount, balance_amount, raw_text"
-    )
+    .select("id, status, confirmed_at, customer_name, customer_phone, from_address, to_address, quote_amount, deposit_amount, balance_amount, raw_text")
     .eq("chat_id", chatId)
     .maybeSingle();
 
@@ -665,7 +520,6 @@ async function getExistingJob(chatId) {
   return data || null;
 }
 
-// ✅ 기존값 유지용 merge
 function keepExisting(existingValue, newValue) {
   return newValue != null && String(newValue).trim() !== "" ? newValue : (existingValue ?? null);
 }
@@ -703,7 +557,6 @@ async function upsertJobByChat({ chatId, lastPayload, lastMessageId, agg, merged
     balance_amount,
   };
 
-  // confirmed_at 최초값 보존 + 이후 상태 변화에도 유지
   if (existingJob?.confirmed_at) {
     row.confirmed_at = existingJob.confirmed_at;
   } else if (agg.status === "confirmed") {
@@ -727,30 +580,14 @@ app.get("/", (req, res) => {
   res.json({ ok: true, service: "ddlogi-channel-webhook", time: new Date().toISOString() });
 });
 
-// ✅ 디버깅용: 라우터 등록 여부 / env 여부 확인
-app.get("/health", (req, res) => {
-  const routes = (app._router?.stack || [])
-    .map((l) => l.route?.path || l.name)
-    .filter(Boolean);
-
-  res.json({
-    ok: true,
-    time: new Date().toISOString(),
-    hasSupabaseEnv,
-    hasSupabaseClient: !!supabase,
-    hasAdminToken: !!ADMIN_API_TOKEN,
-    allowedOrigins: ADMIN_ALLOWED_ORIGINS,
-    routes,
-  });
-});
-
-// ✅ 조회용 API 라우터는 "무조건" 등록 (404 방지)
-// - 토큰 없으면 401
-// - supabase 없으면 503
-app.use("/jobs", jobsRouter({ supabase, adminToken: ADMIN_API_TOKEN }));
+// ✅ 중요: adminToken 전달
+if (supabase) {
+  app.use("/jobs", jobsRouter({ supabase, adminToken: ADMIN_API_TOKEN }));
+} else {
+  console.warn("⚠️ Supabase client missing: /jobs API disabled");
+}
 
 app.post("/webhook/channel", async (req, res) => {
-  // 웹훅 보호 토큰
   if (WEBHOOK_TOKEN) {
     const got = String(req.headers["x-ddlogi-token"] || "");
     if (got !== WEBHOOK_TOKEN) {
@@ -777,7 +614,6 @@ app.post("/webhook/channel", async (req, res) => {
   console.log("textPreview:", maskPhoneInText(String(plainText || "").slice(0, 180)));
 
   try {
-    // 항상 webhook_logs 저장(중복이면 skip/ignore)
     await saveWebhookLog({
       payload,
       messageId,
@@ -793,15 +629,12 @@ app.post("/webhook/channel", async (req, res) => {
       return res.json({ ok: true, status: "draft", reason: "no_chatId" });
     }
 
-    // 누적판단
     const logs = await fetchRecentLogsByChatId(chatId, 120);
     const agg = aggregateFromLogs(logs);
 
-    // 기존 job 조회
     const existingJob = await getExistingJob(chatId);
     const existingStatus = existingJob?.status || null;
 
-    // 상태 전이 정책: downgrade 방지(단 canceled는 예외 허용)
     if (
       agg.status !== "canceled" &&
       existingStatus &&
@@ -812,12 +645,10 @@ app.post("/webhook/channel", async (req, res) => {
       agg.reason = "status_downgrade_blocked";
     }
 
-    // canceled 예외: confirmed → canceled 허용
     if (agg.status === "canceled" && existingStatus === "confirmed") {
       agg.reason = "canceled_after_confirmed";
     }
 
-    // jobs upsert: draft는 생성/업데이트 하지 않음
     if (agg.status !== "draft") {
       const mergedText = logs
         .slice()
@@ -839,7 +670,6 @@ app.post("/webhook/channel", async (req, res) => {
     }
 
     console.log("➡️ aggregatedStatus:", agg.status, "| reason:", agg.reason);
-
     return res.json({ ok: true, status: agg.status, reason: agg.reason });
   } catch (e) {
     console.error("❌ 처리 실패:", e?.message || e);
@@ -853,9 +683,6 @@ app.post("/webhook/channel", async (req, res) => {
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`🚀 Channel Webhook Server Running on port ${PORT}`);
-  if (ADMIN_ALLOWED_ORIGINS.length > 0) {
-    console.log("✅ ADMIN_ALLOWED_ORIGINS:", ADMIN_ALLOWED_ORIGINS.join(", "));
-  } else {
-    console.log("⚠️ ADMIN_ALLOWED_ORIGINS not set (CORS allows all origins in dev).");
-  }
+  if (ADMIN_ALLOWED_ORIGINS.length > 0) console.log("✅ ADMIN_ALLOWED_ORIGINS:", ADMIN_ALLOWED_ORIGINS.join(", "));
+  else console.log("⚠️ ADMIN_ALLOWED_ORIGINS not set (CORS allows all origins in dev).");
 });
