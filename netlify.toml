@@ -1,0 +1,9 @@
+[[redirects]]
+  from = "/admin"
+  to = "/apps/admin/"
+  status = 301
+
+[[redirects]]
+  from = "/admin/*"
+  to = "/apps/admin/:splat"
+  status = 200
