@@ -306,3 +306,7 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`🚀 Channel Webhook Server Running: http://localhost:${PORT}`);
 });
+
+await supabase.from("webhook_logs").insert({
+  payload
+});
