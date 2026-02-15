@@ -1,7 +1,20 @@
 // index.js (ESM / Node 20+)
-// ✅ ChannelTalk Webhook 수신 → webhook_logs 저장(항상) → chat_id 기준 누적판단 → jobs upsert(confirmed/pending_confirm/quoted)
-// ✅ Render 로그: aggregatedStatus / messageId / chatId / preview 출력
-// ✅ 2단계 적용: confirmed(상위 상태) 다운그레이드 방지
+// ✅ ChannelTalk Webhook 수신 → webhook_logs 저장(항상) → chat_id 기준 누적판단 → jobs upsert
+// ✅ statuses: draft / quoted / pending_confirm / confirmed / canceled
+// ✅ Render 로그: aggregatedStatus / messageId / chatId / preview(마스킹)
+// ✅ 포함사항(통합):
+// 1) confirmed_at 최초값 보존
+// 2) 입금 strong/weak 분리 + 부정문 필터
+// 3) canceled 상태 추가 (취소는 예외적으로 상태 전이 허용)
+// 4) 견적문 마커(DDLOGI_QUOTE_V1) 지원 + 기존 키워드 fallback
+// 5) person_type 엄격 분리(user/bot만 판정), others는 판정 제외
+// 6) 최신값 우선 추출(로그 최신→과거 스캔)
+// 7) messageId 중복 저장 방지(서버단 멱등, + DB unique 있으면 더 좋음)
+// 8) 웹훅 보호 토큰 헤더(X-DDLOGI-TOKEN) 검증 (env: DDLOGI_WEBHOOK_TOKEN)
+// 9) 로그 출력 마스킹(전화번호)
+// 10) (선택) DB unique(message_id) 있으면 insert 충돌에도 안전하도록 서버단 멱등 처리
+// 11) hasQuote 보강: limit 확장(기본 120) + 견적문이 앞에 있어도 인식
+// 12) 상태 전이 정책: downgrade 방지 + canceled 예외 처리
 
 import express from "express";
 import "dotenv/config";
@@ -30,6 +43,13 @@ const supabase = hasSupabaseEnv
   : null;
 
 /* =========================
+   Webhook 보호 토큰 (권장)
+   - ChannelTalk에서 Webhook 헤더에 X-DDLOGI-TOKEN을 넣는 방식
+   - Render env: DDLOGI_WEBHOOK_TOKEN
+========================= */
+const WEBHOOK_TOKEN = process.env.DDLOGI_WEBHOOK_TOKEN || "";
+
+/* =========================
    Utils
 ========================= */
 function escapeRegExp(s) {
@@ -45,6 +65,17 @@ function normalizePhone(text) {
   // 010 1234 5678 / 010-1234-5678 / 01012345678 → 01012345678
   const m = String(text || "").match(/01[016789][\s-]?\d{3,4}[\s-]?\d{4}/);
   return m ? m[0].replace(/[\s-]/g, "") : null;
+}
+
+function maskPhoneInText(text) {
+  const t = String(text || "");
+  // 01012345678 → 010****5678 / 010-1234-5678 → 010-****-5678
+  return t.replace(/01[016789][\s-]?\d{3,4}[\s-]?\d{4}/g, (m) => {
+    const digits = m.replace(/[\s-]/g, "");
+    if (digits.length === 11) return digits.slice(0, 3) + "****" + digits.slice(7);
+    if (digits.length === 10) return digits.slice(0, 3) + "***" + digits.slice(6);
+    return "01*********";
+  });
 }
 
 function extractName(text) {
@@ -87,7 +118,6 @@ function extractFromToLoose(text) {
    ChannelTalk payload parsing
 ========================= */
 function pickText(payload) {
-  // ChannelTalk는 entity.plainText가 제일 정확
   const s =
     payload?.entity?.plainText ||
     payload?.entity?.text ||
@@ -110,14 +140,18 @@ function extractUserId(payload) {
 }
 
 function extractPersonType(payload) {
-  return payload?.entity?.personType || null; // "user" | "bot"
+  return payload?.entity?.personType || null; // "user" | "bot" | ...
 }
 
 /* =========================
-   Quote block (bot) detection
+   Quote block detection
+   - 4) 마커 우선: DDLOGI_QUOTE_V1
+   - fallback: 기존 키워드 조합
 ========================= */
+const QUOTE_MARKER = "DDLOGI_QUOTE_V1";
 function isQuoteBlock(text) {
   const t = String(text || "");
+  if (t.includes(QUOTE_MARKER)) return true;
   return (
     t.includes("이사 방식") &&
     t.includes("차량") &&
@@ -130,6 +164,7 @@ function isQuoteBlock(text) {
 
 /* =========================
    Status priority (downgrade 방지)
+   - canceled는 "예외 처리"로 전이 허용(아래 로직에서 처리)
 ========================= */
 function getStatusPriority(status) {
   const map = {
@@ -137,15 +172,130 @@ function getStatusPriority(status) {
     quoted: 1,
     pending_confirm: 2,
     confirmed: 3,
+    // canceled는 우선순위로만 다루면 애매해서(confirmed 후 취소),
+    // 다운그레이드 비교에서는 별도로 처리
+    canceled: 2, // 참고값(실제는 예외 처리)
   };
   return map[status] ?? 0;
 }
 
 /* =========================
-   Accumulated 판단 (chat_id 기준)
+   최신값 우선 추출 (logs 최신→과거 스캔)
+   - user/bot만 대상으로 값 추출
+========================= */
+function extractLatestFactsFromLogs(logs) {
+  let latest = {
+    phone: null,
+    name: null,
+    fromAddress: null,
+    toAddress: null,
+    quoteAmount: null,
+    depositAmount: null,
+    balanceAmount: null,
+    hasQuote: false,
+    // 입금/진행 의사(강도)
+    hasDepositWeak: false,
+    hasDepositStrong: false,
+    hasProceed: false,
+    // 부정/취소
+    negDeposit: false,
+    negProceed: false,
+    hasCancel: false,
+  };
+
+  // 취소/보류 키워드(정책)
+  const cancelKeywords = ["취소", "취소할게", "취소하겠", "취소합니다", "예약 취소", "진행 취소"];
+  const proceedKeywords = ["그대로 진행", "네 진행", "진행할게요", "진행하겠습니다", "확정", "예약", "진행 부탁", "부탁드립니다"];
+  const proceedNegKeywords = ["취소", "보류", "잠시", "다음에", "나중에", "진행 안", "안 할", "중단"];
+
+  // 입금 strong/weak + 부정문
+  const depositStrong = ["입금완료", "입금 완료", "송금완료", "송금 완료", "이체완료", "이체 완료", "보냈어요", "보냈습니다", "송금했", "이체했"];
+  const depositWeak = ["입금", "송금", "이체", "보낼게요", "입금할게요", "입금 예정", "송금 예정", "이체 예정"];
+  const depositNeg = ["미입금", "입금 전", "입금전", "아직 입금", "아직 안", "안 했", "못했", "보류", "나중에 입금", "입금 못", "입금 안"];
+
+  // 최신→과거
+  for (const row of logs) {
+    const pt = row.person_type;
+    const txt = String(row.plain_text || row.text || "").trim();
+    if (!txt) continue;
+
+    // 견적문은 bot에서 주로 오지만, 혹시 몰라 bot/user 둘 다 체크
+    if (!latest.hasQuote && (pt === "bot" || pt === "user") && isQuoteBlock(txt)) {
+      latest.hasQuote = true;
+    }
+
+    // 금액은 bot 텍스트에서 우선 추출(최신 견적문이 있으면 그걸 쓰게)
+    if (pt === "bot") {
+      if (latest.quoteAmount == null) {
+        const v = extractMoney(txt, "예상금액");
+        if (v != null) latest.quoteAmount = v;
+      }
+      if (latest.depositAmount == null) {
+        const v = extractMoney(txt, "예약금(20%)") ?? extractMoney(txt, "예약금");
+        if (v != null) latest.depositAmount = v;
+      }
+      if (latest.balanceAmount == null) {
+        const v = extractMoney(txt, "잔금(80%)") ?? extractMoney(txt, "잔금");
+        if (v != null) latest.balanceAmount = v;
+      }
+    }
+
+    // 고객 의사/정보는 user에서만 판정(상담사/어드민 섞이는 거 방지)
+    if (pt !== "user") continue;
+
+    // 취소 의사
+    if (!latest.hasCancel && containsKeyword(txt, cancelKeywords)) latest.hasCancel = true;
+
+    // 진행 의사
+    if (!latest.hasProceed && containsKeyword(txt, proceedKeywords)) latest.hasProceed = true;
+    if (!latest.negProceed && containsKeyword(txt, proceedNegKeywords)) latest.negProceed = true;
+
+    // 입금 의사 strong/weak + 부정
+    if (!latest.hasDepositStrong && containsKeyword(txt, depositStrong)) latest.hasDepositStrong = true;
+    if (!latest.hasDepositWeak && containsKeyword(txt, depositWeak)) latest.hasDepositWeak = true;
+    if (!latest.negDeposit && containsKeyword(txt, depositNeg)) latest.negDeposit = true;
+
+    // 전화/이름/주소: 최신값 우선(처음 발견한 값이 최신)
+    if (!latest.phone) {
+      const p = normalizePhone(txt);
+      if (p) latest.phone = p;
+    }
+    if (!latest.name) {
+      const n = extractName(txt);
+      if (n) latest.name = n;
+    }
+
+    if (!latest.fromAddress || !latest.toAddress) {
+      const fromLabel = extractAddressLine(txt, "출발지");
+      const toLabel = extractAddressLine(txt, "도착지");
+      const loose = extractFromToLoose(txt);
+
+      if (!latest.fromAddress) latest.fromAddress = fromLabel || loose.from || null;
+      if (!latest.toAddress) latest.toAddress = toLabel || loose.to || null;
+    }
+
+    // 충분히 다 모였으면 조기 종료(성능)
+    if (
+      latest.phone &&
+      latest.fromAddress &&
+      latest.toAddress &&
+      latest.hasQuote &&
+      (latest.hasDepositStrong || latest.hasProceed || latest.hasCancel)
+    ) {
+      // 그래도 부정문/금액은 더 앞에서 올 수 있으니 완전 break는 안 함
+      // 하지만 대화가 길 경우 이게 효율적이어서 여기선 종료
+      break;
+    }
+  }
+
+  return latest;
+}
+
+/* =========================
+   누적판단: chat_id 기준 최근 로그를 합쳐 상태 결정
 ========================= */
 function aggregateFromLogs(logs) {
-  // logs는 최신순(desc)이라고 가정
+  // 5) person_type 엄격 분리: 판정은 bot/user만
   const botTexts = logs
     .filter((x) => x.person_type === "bot")
     .map((x) => x.plain_text || x.text || "")
@@ -160,53 +310,33 @@ function aggregateFromLogs(logs) {
   const allUser = userTexts.join("\n");
   const all = `${allBot}\n${allUser}`;
 
-  const hasQuote = botTexts.some((t) => isQuoteBlock(t));
+  // 6) 최신값 우선 facts
+  const facts = extractLatestFactsFromLogs(logs);
 
-  // 고객 의사 키워드
-  const hasProceed = containsKeyword(allUser, [
-    "그대로 진행",
-    "네 진행",
-    "진행할게요",
-    "진행하겠습니다",
-    "확정",
-    "예약",
-    "진행 부탁",
-    "부탁드립니다",
-  ]);
+  const phone = facts.phone || normalizePhone(allUser) || null;
+  const name = facts.name || extractName(allUser) || null;
+  const fromAddress = facts.fromAddress || extractAddressLine(allUser, "출발지") || extractFromToLoose(allUser).from || null;
+  const toAddress = facts.toAddress || extractAddressLine(allUser, "도착지") || extractFromToLoose(allUser).to || null;
 
-  const hasDeposit = containsKeyword(allUser, [
-    "입금",
-    "입금완료",
-    "입금 완료",
-    "보냈",
-    "송금",
-    "이체",
-    "완료했",
-    "완료했습니다",
-  ]);
+  const hasQuote = facts.hasQuote || botTexts.some((t) => isQuoteBlock(t));
 
-  // 연락처/이름/주소
-  const phone = normalizePhone(allUser) || normalizePhone(all);
-  const name = extractName(allUser) || extractName(all);
+  // 금액은 bot에서 우선
+  const quoteAmount = facts.quoteAmount ?? extractMoney(allBot, "예상금액");
+  const depositAmount = facts.depositAmount ?? (extractMoney(allBot, "예약금(20%)") ?? extractMoney(allBot, "예약금"));
+  const balanceAmount = facts.balanceAmount ?? (extractMoney(allBot, "잔금(80%)") ?? extractMoney(allBot, "잔금"));
 
-  // 라벨형 + 느슨한 형태 둘 다 대응
-  const fromLabel =
-    extractAddressLine(allUser, "출발지") || extractAddressLine(all, "출발지");
-  const toLabel =
-    extractAddressLine(allUser, "도착지") || extractAddressLine(all, "도착지");
+  // 2) 입금 strong/weak + 부정문 필터
+  const hasDepositStrong = facts.hasDepositStrong && !facts.negDeposit;
+  const hasDepositWeak = facts.hasDepositWeak && !facts.negDeposit;
 
-  const loose = extractFromToLoose(allUser);
-  const fromAddress = fromLabel || loose.from;
-  const toAddress = toLabel || loose.to;
+  // 진행 의사 + 부정문 필터
+  const hasProceed = facts.hasProceed && !facts.negProceed;
 
-  // 금액은 보통 봇 견적문에 존재
-  const quoteAmount = extractMoney(allBot, "예상금액");
-  const depositAmount =
-    extractMoney(allBot, "예약금(20%)") ?? extractMoney(allBot, "예약금");
-  const balanceAmount =
-    extractMoney(allBot, "잔금(80%)") ?? extractMoney(allBot, "잔금");
+  // 3) 취소(부정/보류보다 강함)
+  const hasCancel = facts.hasCancel;
 
-  // ✅ 상태 규칙 (현실형)
+  // ✅ 상태 규칙
+  // 0) 견적문 없으면 draft
   if (!hasQuote) {
     return {
       status: "draft",
@@ -221,10 +351,26 @@ function aggregateFromLogs(logs) {
     };
   }
 
-  if (hasDeposit && phone && fromAddress && toAddress) {
+  // 3) 취소는 예외 상태(견적문이 있는 채팅에서 취소 의사면 canceled)
+  if (hasCancel) {
+    return {
+      status: "canceled",
+      reason: "cancel_intent (chat aggregated)",
+      phone,
+      name,
+      fromAddress,
+      toAddress,
+      quoteAmount,
+      depositAmount,
+      balanceAmount,
+    };
+  }
+
+  // 1) confirmed: 입금 "완료형(Strong)" + 전화 + 출/도착
+  if (hasDepositStrong && phone && fromAddress && toAddress) {
     return {
       status: "confirmed",
-      reason: "deposit+phone+from/to (chat aggregated)",
+      reason: "deposit_strong+phone+from/to (chat aggregated)",
       phone,
       name,
       fromAddress,
@@ -235,10 +381,11 @@ function aggregateFromLogs(logs) {
     };
   }
 
-  if (hasProceed) {
+  // 2) pending_confirm: 진행 의사 OR 입금 약한 의사(예정/할게요)
+  if (hasProceed || hasDepositWeak) {
     return {
       status: "pending_confirm",
-      reason: "proceed_intent (chat aggregated)",
+      reason: hasProceed ? "proceed_intent (chat aggregated)" : "deposit_weak_intent (chat aggregated)",
       phone,
       name,
       fromAddress,
@@ -249,6 +396,7 @@ function aggregateFromLogs(logs) {
     };
   }
 
+  // 3) quoted
   return {
     status: "quoted",
     reason: "quote_exists_only",
@@ -265,6 +413,21 @@ function aggregateFromLogs(logs) {
 /* =========================
    DB helpers
 ========================= */
+
+// 7) messageId 중복 저장 방지: 서버단 멱등(있으면 skip)
+async function webhookLogExists(messageId) {
+  if (!supabase || !messageId) return false;
+  const { data, error } = await supabase
+    .from("webhook_logs")
+    .select("id")
+    .eq("message_id", messageId)
+    .limit(1);
+
+  if (error) return false;
+  return (data || []).length > 0;
+}
+
+// webhook_logs 저장
 async function saveWebhookLog({
   payload,
   messageId,
@@ -276,6 +439,12 @@ async function saveWebhookLog({
   plainText,
 }) {
   if (!supabase) return;
+
+  // 중복 방지(서버단)
+  if (messageId) {
+    const exists = await webhookLogExists(messageId);
+    if (exists) return;
+  }
 
   const { error } = await supabase.from("webhook_logs").insert({
     source: "channeltalk",
@@ -292,7 +461,8 @@ async function saveWebhookLog({
   if (error) console.warn("⚠️ webhook_logs 저장 실패:", error.message);
 }
 
-async function fetchRecentLogsByChatId(chatId, limit = 30) {
+// 11) 견적문이 앞쪽에 있어도 인식되게 limit 확장(기본 120)
+async function fetchRecentLogsByChatId(chatId, limit = 120) {
   if (!supabase || !chatId) return [];
 
   const { data, error } = await supabase
@@ -309,12 +479,12 @@ async function fetchRecentLogsByChatId(chatId, limit = 30) {
   return data || [];
 }
 
-async function getExistingJobStatus(chatId) {
+async function getExistingJob(chatId) {
   if (!supabase || !chatId) return null;
 
   const { data, error } = await supabase
     .from("jobs")
-    .select("status")
+    .select("id, status, confirmed_at")
     .eq("chat_id", chatId)
     .maybeSingle();
 
@@ -322,10 +492,11 @@ async function getExistingJobStatus(chatId) {
     console.warn("⚠️ 기존 job 조회 실패:", error.message);
     return null;
   }
-  return data?.status || null;
+  return data || null;
 }
 
-async function upsertJobByChat({ chatId, lastPayload, lastMessageId, agg, mergedText }) {
+// jobs upsert
+async function upsertJobByChat({ chatId, lastPayload, lastMessageId, agg, mergedText, existingJob }) {
   if (!supabase) return null;
 
   const row = {
@@ -349,8 +520,19 @@ async function upsertJobByChat({ chatId, lastPayload, lastMessageId, agg, merged
     balance_amount: agg.balanceAmount ?? null,
   };
 
+  // 1) confirmed_at 최초값 보존
+  // - 기존 confirmed_at이 있으면 유지
+  // - 없다면 confirmed 전이 순간에만 기록
   if (agg.status === "confirmed") {
-    row.confirmed_at = new Date().toISOString();
+    if (existingJob?.confirmed_at) {
+      row.confirmed_at = existingJob.confirmed_at;
+    } else {
+      row.confirmed_at = new Date().toISOString();
+    }
+  } else {
+    // 이미 confirmed였던 건이 다른 상태로 바뀌어도(취소 포함),
+    // confirmed_at은 유지(운영상 추적용)
+    if (existingJob?.confirmed_at) row.confirmed_at = existingJob.confirmed_at;
   }
 
   const { data, error } = await supabase
@@ -371,6 +553,14 @@ app.get("/", (req, res) => {
 });
 
 app.post("/webhook/channel", async (req, res) => {
+  // 8) 웹훅 보호 토큰
+  if (WEBHOOK_TOKEN) {
+    const got = String(req.headers["x-ddlogi-token"] || "");
+    if (got !== WEBHOOK_TOKEN) {
+      return res.status(401).json({ ok: false, error: "unauthorized" });
+    }
+  }
+
   const payload = req.body || {};
 
   const text = pickText(payload);
@@ -388,10 +578,11 @@ app.post("/webhook/channel", async (req, res) => {
   console.log("messageId:", messageId);
   console.log("chatId:", chatId);
   console.log("personType:", personType);
-  console.log("textPreview:", String(plainText || "").slice(0, 180));
+  // 9) 로그 마스킹
+  console.log("textPreview:", maskPhoneInText(String(plainText || "").slice(0, 180)));
 
   try {
-    // 1) 항상 webhook_logs 저장
+    // 7) 무조건 webhook_logs 저장(중복이면 skip)
     await saveWebhookLog({
       payload,
       messageId,
@@ -408,13 +599,19 @@ app.post("/webhook/channel", async (req, res) => {
       return res.json({ ok: true, status: "draft", reason: "no_chatId" });
     }
 
-    // 2) chat_id 기준 최근 로그 조회 → 누적판단
-    const logs = await fetchRecentLogsByChatId(chatId, 30);
+    // 11) chat_id 기준 최근 로그 조회(기본 120) → 누적판단
+    const logs = await fetchRecentLogsByChatId(chatId, 120);
     const agg = aggregateFromLogs(logs);
 
-    // 2.5) ✅ 다운그레이드 방지 (기존 상태가 더 높으면 유지)
-    const existingStatus = await getExistingJobStatus(chatId);
+    // 기존 job 조회
+    const existingJob = await getExistingJob(chatId);
+    const existingStatus = existingJob?.status || null;
+
+    // 12) 상태 전이 정책
+    // - downgrade 방지: 기존이 더 높은 상태면 유지
+    // - 단, canceled는 예외로 허용(취소 의사 오면 취소로 전이 가능)
     if (
+      agg.status !== "canceled" &&
       existingStatus &&
       getStatusPriority(existingStatus) > getStatusPriority(agg.status)
     ) {
@@ -423,7 +620,12 @@ app.post("/webhook/channel", async (req, res) => {
       agg.reason = "status_downgrade_blocked";
     }
 
-    // 3) jobs upsert: draft는 생성/업데이트 하지 않음
+    // canceled 예외: confirmed에서 canceled로 가는 건 허용
+    if (agg.status === "canceled" && existingStatus === "confirmed") {
+      agg.reason = "canceled_after_confirmed";
+    }
+
+    // jobs upsert: draft는 생성/업데이트 하지 않음
     if (agg.status !== "draft") {
       const mergedText = logs
         .slice()
@@ -438,6 +640,7 @@ app.post("/webhook/channel", async (req, res) => {
         lastMessageId: messageId,
         agg,
         mergedText,
+        existingJob,
       });
 
       console.log("✅ jobs upsert:", job);
