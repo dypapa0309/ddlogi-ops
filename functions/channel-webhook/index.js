@@ -1,7 +1,7 @@
 // index.js (ESM / Node 20+)
 // ✅ ChannelTalk Webhook 수신 → webhook_logs 저장(항상) → chat_id 기준 누적판단 → jobs upsert(confirmed/pending_confirm/quoted)
 // ✅ Render 로그: aggregatedStatus / messageId / chatId / preview 출력
-// ✅ 최소 변경 원칙: 기존 구조 유지 + determineStatus 제거 + chat 누적판단
+// ✅ 2단계 적용: confirmed(상위 상태) 다운그레이드 방지
 
 import express from "express";
 import "dotenv/config";
@@ -129,9 +129,20 @@ function isQuoteBlock(text) {
 }
 
 /* =========================
+   Status priority (downgrade 방지)
+========================= */
+function getStatusPriority(status) {
+  const map = {
+    draft: 0,
+    quoted: 1,
+    pending_confirm: 2,
+    confirmed: 3,
+  };
+  return map[status] ?? 0;
+}
+
+/* =========================
    Accumulated 판단 (chat_id 기준)
-   - webhook_logs 최신 N개 조회 후
-   - bot/user 텍스트를 합쳐 상태 산출
 ========================= */
 function aggregateFromLogs(logs) {
   // logs는 최신순(desc)이라고 가정
@@ -162,6 +173,7 @@ function aggregateFromLogs(logs) {
     "진행 부탁",
     "부탁드립니다",
   ]);
+
   const hasDeposit = containsKeyword(allUser, [
     "입금",
     "입금완료",
@@ -195,7 +207,6 @@ function aggregateFromLogs(logs) {
     extractMoney(allBot, "잔금(80%)") ?? extractMoney(allBot, "잔금");
 
   // ✅ 상태 규칙 (현실형)
-  // 0) 견적문 자체가 없으면 draft
   if (!hasQuote) {
     return {
       status: "draft",
@@ -210,7 +221,6 @@ function aggregateFromLogs(logs) {
     };
   }
 
-  // 1) 입금 + (전화) + (출/도착) → confirmed
   if (hasDeposit && phone && fromAddress && toAddress) {
     return {
       status: "confirmed",
@@ -225,7 +235,6 @@ function aggregateFromLogs(logs) {
     };
   }
 
-  // 2) 진행 의사 → pending_confirm
   if (hasProceed) {
     return {
       status: "pending_confirm",
@@ -240,7 +249,6 @@ function aggregateFromLogs(logs) {
     };
   }
 
-  // 3) 그 외 견적만 존재 → quoted
   return {
     status: "quoted",
     reason: "quote_exists_only",
@@ -257,10 +265,6 @@ function aggregateFromLogs(logs) {
 /* =========================
    DB helpers
 ========================= */
-
-// webhook_logs 권장 컬럼:
-// source, message_id, status, text, plain_text, chat_id, person_type, user_id, payload(jsonb), created_at default now()
-
 async function saveWebhookLog({
   payload,
   messageId,
@@ -305,10 +309,21 @@ async function fetchRecentLogsByChatId(chatId, limit = 30) {
   return data || [];
 }
 
-// jobs 예시 컬럼:
-// source, chat_id(UNIQUE 권장), source_message_id, customer_name, customer_phone,
-// from_address, to_address, raw_text, payload, status, status_reason, confirmed_at,
-// quote_amount, deposit_amount, balance_amount
+async function getExistingJobStatus(chatId) {
+  if (!supabase || !chatId) return null;
+
+  const { data, error } = await supabase
+    .from("jobs")
+    .select("status")
+    .eq("chat_id", chatId)
+    .maybeSingle();
+
+  if (error) {
+    console.warn("⚠️ 기존 job 조회 실패:", error.message);
+    return null;
+  }
+  return data?.status || null;
+}
 
 async function upsertJobByChat({ chatId, lastPayload, lastMessageId, agg, mergedText }) {
   if (!supabase) return null;
@@ -338,7 +353,6 @@ async function upsertJobByChat({ chatId, lastPayload, lastMessageId, agg, merged
     row.confirmed_at = new Date().toISOString();
   }
 
-  // ✅ chat_id 기준 단일 row 관리 (jobs에 UNIQUE(chat_id) 권장)
   const { data, error } = await supabase
     .from("jobs")
     .upsert(row, { onConflict: "chat_id" })
@@ -398,7 +412,18 @@ app.post("/webhook/channel", async (req, res) => {
     const logs = await fetchRecentLogsByChatId(chatId, 30);
     const agg = aggregateFromLogs(logs);
 
-    // 3) jobs upsert: draft는 생성/업데이트 하지 않음 (원하면 바꿔도 됨)
+    // 2.5) ✅ 다운그레이드 방지 (기존 상태가 더 높으면 유지)
+    const existingStatus = await getExistingJobStatus(chatId);
+    if (
+      existingStatus &&
+      getStatusPriority(existingStatus) > getStatusPriority(agg.status)
+    ) {
+      console.log("⛔ status downgrade blocked:", existingStatus, "→", agg.status);
+      agg.status = existingStatus;
+      agg.reason = "status_downgrade_blocked";
+    }
+
+    // 3) jobs upsert: draft는 생성/업데이트 하지 않음
     if (agg.status !== "draft") {
       const mergedText = logs
         .slice()
