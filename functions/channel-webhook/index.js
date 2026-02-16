@@ -1,20 +1,41 @@
 // functions/channel-webhook/index.js (ESM / Node 20+)
-// ChannelTalk Webhook 수신 → webhook_logs 저장(항상) → chat_id 기준 누적판단 → jobs upsert
-// statuses: draft / quoted / pending_confirm / confirmed / canceled
-// 운영용: GET /jobs, GET /jobs/:chatId (ADMIN_API_TOKEN Bearer)
-// CORS + OPTIONS + /jobs rate limit
+// ✅ ChannelTalk Webhook 수신 → webhook_logs 저장(항상, PII-safe)
+// ✅ (권장) B안: jobs 상태 전이/업데이트는 Supabase(DB 트리거/함수)가 전담
+//    - 기본값: USE_DB_STATE_MACHINE=1(또는 미설정)
+//    - 예전 방식(서버가 jobs upsert) 쓰려면 USE_DB_STATE_MACHINE=0
 
 import express from "express";
 import "dotenv/config";
 import { createClient } from "@supabase/supabase-js";
+import crypto from "crypto";
 
-import jobsRouter from "./routes/jobs.js"; // ✅ 파일 단일화
+import jobsRouter from "./routes/jobs.js";
 
 /* =========================
    App
 ========================= */
 const app = express();
 app.use(express.json({ limit: "2mb", type: "*/*" }));
+
+/* =========================
+   Env / Flags
+========================= */
+const WEBHOOK_TOKEN = process.env.DDLOGI_WEBHOOK_TOKEN || ""; // webhook 보호(선택)
+const JOBS_RL_MAX = parseInt(process.env.JOBS_RL_MAX || "120", 10);
+
+// ✅ B안: DB 상태머신이 jobs 담당 (기본 ON)
+const USE_DB_STATE_MACHINE = String(process.env.USE_DB_STATE_MACHINE || "1") !== "0";
+
+// 기본: raw_text 저장 안 함. 필요할 때만 1로 켬(마스킹 후 저장)
+const STORE_MASKED_RAW_TEXT = String(process.env.STORE_MASKED_RAW_TEXT || "0") === "1";
+
+// CORS
+const ADMIN_ALLOWED_ORIGINS = String(process.env.ADMIN_ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const IS_PROD = String(process.env.NODE_ENV || "").toLowerCase() === "production";
 
 /* =========================
    Supabase (서버 전용)
@@ -28,27 +49,22 @@ if (!hasSupabaseEnv) {
 
 const supabase = hasSupabaseEnv
   ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
-      auth: { persistSession: false },
+      auth: { persistSession: false, autoRefreshToken: false },
     })
   : null;
-
-/* =========================
-   Tokens
-========================= */
-const WEBHOOK_TOKEN = process.env.DDLOGI_WEBHOOK_TOKEN || ""; // webhook 보호(선택)
-const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN || "";     // ✅ /jobs 보호 토큰
-
-const ADMIN_ALLOWED_ORIGINS = String(process.env.ADMIN_ALLOWED_ORIGINS || "")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
 
 /* =========================
    CORS (Admin only)
 ========================= */
 function isAllowedOrigin(origin) {
   if (!origin) return false;
-  if (ADMIN_ALLOWED_ORIGINS.length === 0) return true; // dev 편의
+
+  // ✅ prod에서 미설정이면 차단(사고 방지)
+  if (IS_PROD && ADMIN_ALLOWED_ORIGINS.length === 0) return false;
+
+  // dev 편의
+  if (!IS_PROD && ADMIN_ALLOWED_ORIGINS.length === 0) return true;
+
   return ADMIN_ALLOWED_ORIGINS.includes(origin);
 }
 
@@ -62,7 +78,7 @@ app.use((req, res, next) => {
     res.setHeader("Access-Control-Allow-Credentials", "true");
     res.setHeader(
       "Access-Control-Allow-Headers",
-      "Content-Type, Authorization, X-DDLOGI-TOKEN"
+      "Content-Type, Authorization, X-DDLOGI-TOKEN, X-ADMIN-TOKEN"
     );
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
     res.setHeader("Access-Control-Max-Age", "600");
@@ -80,7 +96,6 @@ app.use((req, res, next) => {
    Rate Limit (for /jobs only)
 ========================= */
 const RL_WINDOW_MS = 60 * 1000;
-const RL_MAX = parseInt(process.env.JOBS_RL_MAX || "120", 10);
 const rlMap = new Map();
 
 function getClientIp(req) {
@@ -105,7 +120,7 @@ function rateLimitJobs(req, res, next) {
   rec.count += 1;
   rlMap.set(ip, rec);
 
-  if (rec.count > RL_MAX) {
+  if (rec.count > JOBS_RL_MAX) {
     return res.status(429).json({ error: "Too many requests" });
   }
 
@@ -114,7 +129,52 @@ function rateLimitJobs(req, res, next) {
 app.use(rateLimitJobs);
 
 /* =========================
-   Utils
+   PII-safe helpers
+========================= */
+function sha256(text) {
+  return crypto.createHash("sha256").update(String(text || ""), "utf8").digest("hex");
+}
+
+function clampText(s, max = 1200) {
+  const str = String(s || "");
+  return str.length > max ? str.slice(0, max) + "…" : str;
+}
+
+function maskPII(text) {
+  let t = String(text || "");
+
+  // 전화번호 마스킹
+  t = t.replace(/01[016789][\s-]?\d{3,4}[\s-]?\d{4}/g, (m) => {
+    const digits = m.replace(/[\s-]/g, "");
+    if (digits.length === 11) return digits.slice(0, 3) + "****" + digits.slice(7);
+    if (digits.length === 10) return digits.slice(0, 3) + "***" + digits.slice(6);
+    return "01*********";
+  });
+
+  // 이메일 마스킹
+  t = t.replace(
+    /\b([A-Z0-9._%+-]{1,64})@([A-Z0-9.-]{1,255}\.[A-Z]{2,24})\b/gi,
+    (m) => {
+      const [u, d] = m.split("@");
+      const uu = u.length <= 2 ? "*".repeat(u.length) : u.slice(0, 2) + "***";
+      return `${uu}@${d}`;
+    }
+  );
+
+  // 계좌처럼 보이는 숫자-숫자-숫자 마스킹(보수)
+  t = t.replace(/\b(\d{2,6})-(\d{2,8})-(\d{2,8})\b/g, "$1-****-$3");
+
+  // 주소: 시/도 + 구/군/시 + 동/읍/면까지만 남기고 뒤는 줄임(보수)
+  t = t.replace(
+    /\b(서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|전북|전남|경북|경남|제주)\s+([^\n]{0,30}?(구|군|시))\s+([^\n]{0,30}?(동|읍|면))([^\n]*)/g,
+    (m, p1, p2, _g, p4) => `${p1} ${p2} ${p4} …`
+  );
+
+  return t;
+}
+
+/* =========================
+   Utils (기존 로직 유지)
 ========================= */
 function escapeRegExp(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -128,16 +188,6 @@ function containsKeyword(text, keywords) {
 function normalizePhone(text) {
   const m = String(text || "").match(/01[016789][\s-]?\d{3,4}[\s-]?\d{4}/);
   return m ? m[0].replace(/[\s-]/g, "") : null;
-}
-
-function maskPhoneInText(text) {
-  const t = String(text || "");
-  return t.replace(/01[016789][\s-]?\d{3,4}[\s-]?\d{4}/g, (m) => {
-    const digits = m.replace(/[\s-]/g, "");
-    if (digits.length === 11) return digits.slice(0, 3) + "****" + digits.slice(7);
-    if (digits.length === 10) return digits.slice(0, 3) + "***" + digits.slice(6);
-    return "01*********";
-  });
 }
 
 function extractName(text) {
@@ -227,8 +277,39 @@ function extractMessageId(payload) {
   return payload?.entity?.id || payload?.message?.id || payload?.id || null;
 }
 
+/**
+ * ✅ FIX: ChannelTalk payload 버전에 따라 chatId가 달라져서
+ * 후보 경로를 넓혀 안정적으로 추출
+ */
 function extractChatId(payload) {
-  return payload?.entity?.chatId || payload?.refers?.userChat?.id || null;
+  return (
+    payload?.entity?.chatId ||
+    payload?.entity?.chat?.id ||
+    payload?.entity?.chat?.chatId ||
+    payload?.refers?.userChat?.id ||
+    payload?.refers?.chat?.id ||
+    payload?.chatId ||
+    payload?.chat_id ||
+    null
+  );
+}
+
+/**
+ * ✅ PII 없이 "어느 키에서 잡혔는지"만 표시하는 디버그
+ */
+function debugChatIdSource(payload) {
+  const candidates = [
+    ["entity.chatId", payload?.entity?.chatId],
+    ["entity.chat.id", payload?.entity?.chat?.id],
+    ["entity.chat.chatId", payload?.entity?.chat?.chatId],
+    ["refers.userChat.id", payload?.refers?.userChat?.id],
+    ["refers.chat.id", payload?.refers?.chat?.id],
+    ["chatId", payload?.chatId],
+    ["chat_id", payload?.chat_id],
+  ];
+
+  const hit = candidates.find(([, v]) => !!v);
+  return hit ? hit[0] : "NONE";
 }
 
 function extractUserId(payload) {
@@ -273,7 +354,7 @@ function getStatusPriority(status) {
 }
 
 /* =========================
-   최신값 우선 추출
+   최신값 우선 추출 (기존 로직 유지)
 ========================= */
 function extractLatestFactsFromLogs(logs) {
   let latest = {
@@ -303,7 +384,7 @@ function extractLatestFactsFromLogs(logs) {
 
   for (const row of logs) {
     const pt = row.person_type;
-    const txt = String(row.plain_text || row.text || "").trim();
+    const txt = String(row.preview || "").trim(); // ✅ preview만
     if (!txt) continue;
 
     if (!latest.hasQuote && (pt === "bot" || pt === "user") && isQuoteBlock(txt)) {
@@ -375,17 +456,17 @@ function extractLatestFactsFromLogs(logs) {
 }
 
 /* =========================
-   누적판단
+   누적판단 (서버 jobs upsert 모드에서만 사용)
 ========================= */
 function aggregateFromLogs(logs) {
   const botTexts = logs
     .filter((x) => x.person_type === "bot")
-    .map((x) => x.plain_text || x.text || "")
+    .map((x) => x.preview || "")
     .filter((s) => String(s).trim().length > 0);
 
   const userTexts = logs
     .filter((x) => x.person_type === "user")
-    .map((x) => x.plain_text || x.text || "")
+    .map((x) => x.preview || "")
     .filter((s) => String(s).trim().length > 0);
 
   const allBot = botTexts.join("\n");
@@ -410,7 +491,9 @@ function aggregateFromLogs(logs) {
 
   const hasQuote = facts.hasQuote || botTexts.some((t) => isQuoteBlock(t));
 
-  const quoteAmount = facts.quoteAmount ?? (extractMoney(allBot, "예상금액") ?? extractMoneyLoose(allBot, "quote"));
+  const quoteAmount =
+    facts.quoteAmount ?? (extractMoney(allBot, "예상금액") ?? extractMoneyLoose(allBot, "quote"));
+
   const depositAmount =
     facts.depositAmount ??
     (extractMoney(allBot, "예약금(20%)") ??
@@ -429,70 +512,125 @@ function aggregateFromLogs(logs) {
   const hasCancel = facts.hasCancel;
 
   if (!hasQuote) {
-    return { status: "draft", reason: "no_quote_block_in_chat", phone, name, fromAddress, toAddress, quoteAmount, depositAmount, balanceAmount };
+    return {
+      status: "draft",
+      reason: "no_quote_block_in_chat",
+      phone,
+      name,
+      fromAddress,
+      toAddress,
+      quoteAmount,
+      depositAmount,
+      balanceAmount,
+    };
   }
 
   if (hasCancel) {
-    return { status: "canceled", reason: "cancel_intent (chat aggregated)", phone, name, fromAddress, toAddress, quoteAmount, depositAmount, balanceAmount };
+    return {
+      status: "canceled",
+      reason: "cancel_intent (chat aggregated)",
+      phone,
+      name,
+      fromAddress,
+      toAddress,
+      quoteAmount,
+      depositAmount,
+      balanceAmount,
+    };
   }
 
   if (hasDepositStrong && phone && fromAddress && toAddress) {
-    return { status: "confirmed", reason: "deposit_strong+phone+from/to (chat aggregated)", phone, name, fromAddress, toAddress, quoteAmount, depositAmount, balanceAmount };
+    return {
+      status: "confirmed",
+      reason: "deposit_strong+phone+from/to (chat aggregated)",
+      phone,
+      name,
+      fromAddress,
+      toAddress,
+      quoteAmount,
+      depositAmount,
+      balanceAmount,
+    };
   }
 
   if (hasProceed || hasDepositWeak) {
-    return { status: "pending_confirm", reason: hasProceed ? "proceed_intent (chat aggregated)" : "deposit_weak_intent (chat aggregated)", phone, name, fromAddress, toAddress, quoteAmount, depositAmount, balanceAmount };
+    return {
+      status: "pending_confirm",
+      reason: hasProceed ? "proceed_intent (chat aggregated)" : "deposit_weak_intent (chat aggregated)",
+      phone,
+      name,
+      fromAddress,
+      toAddress,
+      quoteAmount,
+      depositAmount,
+      balanceAmount,
+    };
   }
 
-  return { status: "quoted", reason: "quote_exists_only", phone, name, fromAddress, toAddress, quoteAmount, depositAmount, balanceAmount };
+  return {
+    status: "quoted",
+    reason: "quote_exists_only",
+    phone,
+    name,
+    fromAddress,
+    toAddress,
+    quoteAmount,
+    depositAmount,
+    balanceAmount,
+  };
 }
 
 /* =========================
-   DB helpers
+   DB helpers (PII-safe)
 ========================= */
-async function webhookLogExists(messageId) {
-  if (!supabase || !messageId) return false;
-  const { data, error } = await supabase
-    .from("webhook_logs")
-    .select("id")
-    .eq("message_id", messageId)
-    .limit(1);
-  if (error) return false;
-  return (data || []).length > 0;
-}
-
-async function saveWebhookLog({ payload, messageId, status, text, chatId, personType, userId, plainText }) {
+async function saveWebhookLogSafe({ messageId, inferredStatus, text, chatId, personType, userId, plainText }) {
   if (!supabase) return;
 
-  if (messageId) {
-    const exists = await webhookLogExists(messageId);
-    if (exists) return;
-  }
+  const raw = plainText || text || "";
+  const masked = maskPII(raw);
 
-  const { error } = await supabase.from("webhook_logs").insert({
-    source: "channeltalk",
-    message_id: messageId,
-    status: status || "draft",
-    text: text || null,
-    plain_text: plainText || null,
+  const row = {
+    provider: "channeltalk",
+    event_type: "message",
+
+    // ✅ 누적판단/매칭을 위해 chat_id 유지 (원문이 아니라 ID)
     chat_id: chatId || null,
-    person_type: personType || null,
-    user_id: userId || null,
-    payload,
-  });
+    message_id: messageId || null,
 
+    // ✅ 중복/검색용 해시
+    chat_id_hash: chatId ? sha256(chatId) : null,
+    message_id_hash: messageId ? sha256(messageId) : null,
+
+    // ✅ preview만 저장(PII 마스킹 + 길이 제한)
+    preview: clampText(masked, personType === "bot" ? 2000 : 1200),
+
+    inferred_status: inferredStatus || "draft",
+
+    // ✅ 최소 메타만
+    meta: {
+      person_type: personType || null,
+      user_id: userId || null,
+      text_len: String(raw).length,
+      v: "SAFELOG_V1",
+    },
+  };
+
+  const { error } = await supabase.from("webhook_logs").insert(row);
+
+  // UNIQUE 충돌이면 무시(중복 race 해결)
   if (error) {
-    const msg = String(error.message || "");
-    if (msg.toLowerCase().includes("duplicate") || msg.toLowerCase().includes("unique")) return;
+    const msg = String(error.message || "").toLowerCase();
+    if (msg.includes("duplicate") || msg.includes("unique")) return;
     console.warn("⚠️ webhook_logs 저장 실패:", error.message);
   }
 }
 
+// 아래 3개는 USE_DB_STATE_MACHINE=0(서버 jobs upsert 모드)에서만 사용
 async function fetchRecentLogsByChatId(chatId, limit = 120) {
   if (!supabase || !chatId) return [];
   const { data, error } = await supabase
     .from("webhook_logs")
-    .select("created_at, message_id, status, text, plain_text, chat_id, person_type, user_id")
+    .select("created_at, message_id, inferred_status, preview, chat_id, meta")
     .eq("chat_id", chatId)
     .order("created_at", { ascending: false })
     .limit(limit);
@@ -501,7 +639,16 @@ async function fetchRecentLogsByChatId(chatId, limit = 120) {
     console.warn("⚠️ webhook_logs 조회 실패:", error.message);
     return [];
   }
-  return data || [];
+
+  return (data || []).map((x) => ({
+    created_at: x.created_at,
+    message_id: x.message_id,
+    status: x.inferred_status,
+    preview: x.preview,
+    chat_id: x.chat_id,
+    person_type: x?.meta?.person_type || null,
+    user_id: x?.meta?.user_id || null,
+  }));
 }
 
 async function getExistingJob(chatId) {
@@ -509,7 +656,9 @@ async function getExistingJob(chatId) {
 
   const { data, error } = await supabase
     .from("jobs")
-    .select("id, status, confirmed_at, customer_name, customer_phone, from_address, to_address, quote_amount, deposit_amount, balance_amount, raw_text")
+    .select(
+      "id, status, ops_status, confirmed_at, customer_name, customer_phone, from_address, to_address, quote_amount, deposit_amount, balance_amount, raw_text"
+    )
     .eq("chat_id", chatId)
     .maybeSingle();
 
@@ -524,7 +673,7 @@ function keepExisting(existingValue, newValue) {
   return newValue != null && String(newValue).trim() !== "" ? newValue : (existingValue ?? null);
 }
 
-async function upsertJobByChat({ chatId, lastPayload, lastMessageId, agg, mergedText, existingJob }) {
+async function upsertJobByChat({ chatId, lastMessageId, agg, mergedText, existingJob }) {
   if (!supabase) return null;
 
   const customer_name = keepExisting(existingJob?.customer_name, agg.name);
@@ -546,8 +695,9 @@ async function upsertJobByChat({ chatId, lastPayload, lastMessageId, agg, merged
     from_address,
     to_address,
 
-    raw_text: mergedText || existingJob?.raw_text || null,
-    payload: lastPayload,
+    raw_text: STORE_MASKED_RAW_TEXT
+      ? clampText(maskPII(mergedText || ""), 6000)
+      : (existingJob?.raw_text ?? null),
 
     status: agg.status,
     status_reason: agg.reason,
@@ -566,7 +716,7 @@ async function upsertJobByChat({ chatId, lastPayload, lastMessageId, agg, merged
   const { data, error } = await supabase
     .from("jobs")
     .upsert(row, { onConflict: "chat_id" })
-    .select("id, status")
+    .select("id, status, ops_status")
     .single();
 
   if (error) throw error;
@@ -580,16 +730,12 @@ app.get("/", (req, res) => {
   res.json({ ok: true, service: "ddlogi-channel-webhook", time: new Date().toISOString() });
 });
 
-// ✅ 중요: adminToken 전달
+// ✅ adminToken 주입 제거 (인증은 middlewares/adminAuth.js에서만)
 if (supabase) {
-  app.use("/jobs", jobsRouter({ 
-    supabase, 
-    adminToken: ADMIN_API_TOKEN 
-  }));
+  app.use("/jobs", jobsRouter({ supabase }));
 } else {
   console.warn("⚠️ Supabase client missing: /jobs API disabled");
 }
-
 
 app.post("/webhook/channel", async (req, res) => {
   if (WEBHOOK_TOKEN) {
@@ -604,24 +750,27 @@ app.post("/webhook/channel", async (req, res) => {
   const text = pickText(payload);
   const messageId = extractMessageId(payload);
   const chatId = extractChatId(payload);
+  const chatIdSource = debugChatIdSource(payload);
   const userId = extractUserId(payload);
   const personType = extractPersonType(payload);
   const plainText = payload?.entity?.plainText || text;
 
   const singleStatus = "draft";
 
+  // ✅ 콘솔에는 PII 출력 금지 (해시/길이/소스만)
   console.log("\n========================");
   console.log("📩 메시지 수신");
-  console.log("messageId:", messageId);
-  console.log("chatId:", chatId);
+  console.log("messageIdHash:", messageId ? sha256(messageId).slice(0, 16) : null);
+  console.log("chatIdSource:", chatIdSource);
+  console.log("chatIdHash:", chatId ? sha256(chatId).slice(0, 16) : null);
   console.log("personType:", personType);
-  console.log("textPreview:", maskPhoneInText(String(plainText || "").slice(0, 180)));
+  console.log("textLen:", String(plainText || "").length);
+  console.log("USE_DB_STATE_MACHINE:", USE_DB_STATE_MACHINE ? "ON" : "OFF");
 
   try {
-    await saveWebhookLog({
-      payload,
+    await saveWebhookLogSafe({
       messageId,
-      status: singleStatus,
+      inferredStatus: singleStatus,
       text,
       chatId,
       personType,
@@ -630,15 +779,26 @@ app.post("/webhook/channel", async (req, res) => {
     });
 
     if (!chatId) {
-      return res.json({ ok: true, status: "draft", reason: "no_chatId" });
+      // chatId 못 잡으면 DB 상태머신도 매칭 불가 → 로그 저장만 하고 종료
+      return res.json({ ok: true, status: "draft", reason: "no_chatId", chatIdSource });
     }
 
+    // ✅ B안: DB가 jobs를 전담한다면 여기서 종료 (webhook_logs insert 후 트리거가 jobs 반영)
+    if (USE_DB_STATE_MACHINE) {
+      return res.json({ ok: true, status: "logged", reason: "db_state_machine", chatIdSource });
+    }
+
+    // -------------------------------------------------
+    // (옵션) A안 호환: 서버에서 누적판단 + jobs upsert
+    // USE_DB_STATE_MACHINE=0 일 때만 동작
+    // -------------------------------------------------
     const logs = await fetchRecentLogsByChatId(chatId, 120);
     const agg = aggregateFromLogs(logs);
 
     const existingJob = await getExistingJob(chatId);
     const existingStatus = existingJob?.status || null;
 
+    // ✅ confirmed→quoted 같은 다운그레이드 방지
     if (
       agg.status !== "canceled" &&
       existingStatus &&
@@ -657,13 +817,12 @@ app.post("/webhook/channel", async (req, res) => {
       const mergedText = logs
         .slice()
         .reverse()
-        .map((x) => `[${x.person_type}] ${(x.plain_text || x.text || "").trim()}`)
+        .map((x) => `[${x.person_type}] ${(x.preview || "").trim()}`)
         .filter((s) => s.replace(/\[.*?\]\s*/, "").trim().length > 0)
         .join("\n");
 
       const job = await upsertJobByChat({
         chatId,
-        lastPayload: payload,
         lastMessageId: messageId,
         agg,
         mergedText,
@@ -674,7 +833,7 @@ app.post("/webhook/channel", async (req, res) => {
     }
 
     console.log("➡️ aggregatedStatus:", agg.status, "| reason:", agg.reason);
-    return res.json({ ok: true, status: agg.status, reason: agg.reason });
+    return res.json({ ok: true, status: agg.status, reason: agg.reason, chatIdSource });
   } catch (e) {
     console.error("❌ 처리 실패:", e?.message || e);
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
@@ -688,5 +847,10 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`🚀 Channel Webhook Server Running on port ${PORT}`);
   if (ADMIN_ALLOWED_ORIGINS.length > 0) console.log("✅ ADMIN_ALLOWED_ORIGINS:", ADMIN_ALLOWED_ORIGINS.join(", "));
-  else console.log("⚠️ ADMIN_ALLOWED_ORIGINS not set (CORS allows all origins in dev).");
+  else
+    console.log(
+      IS_PROD
+        ? "⛔ ADMIN_ALLOWED_ORIGINS missing in prod (CORS blocks)."
+        : "⚠️ ADMIN_ALLOWED_ORIGINS not set (dev allows all origins)."
+    );
 });

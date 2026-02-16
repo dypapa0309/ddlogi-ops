@@ -1,55 +1,13 @@
 // functions/channel-webhook/routes/jobs.js (ESM)
 import { Router } from "express";
+import { requireAdmin } from "../middlewares/adminAuth.js";
 
-export default function jobsRouter({ supabase, adminToken }) {
+export default function jobsRouter({ supabase }) {
   const router = Router();
 
   function requireSupabase(req, res, next) {
     if (!supabase) return res.status(503).json({ error: "SUPABASE_NOT_CONFIGURED" });
     next();
-  }
-
-  // ✅ ADMIN 인증:
-  // 1) (옵션) 레거시: Bearer 토큰이 adminToken과 같으면 통과
-  // 2) Supabase 세션 JWT면: supabase.auth.getUser(jwt)로 유저 확인 → profiles.role=admin 확인
-  async function requireAdmin(req, res, next) {
-    try {
-      const h = String(req.headers.authorization || "");
-      const token = h.startsWith("Bearer ") ? h.slice(7).trim() : "";
-
-      if (!token) return res.status(401).json({ error: "Unauthorized" });
-
-      // 1) 레거시 토큰 병행 (원하면 유지)
-      if (adminToken && token === adminToken) return next();
-
-      // 2) Supabase JWT 검증
-      // ⚠️ 이 supabase 클라이언트는 서버에서 생성된 서비스키 권한이어야 안정적임
-      const { data: userData, error: userErr } = await supabase.auth.getUser(token);
-      if (userErr || !userData?.user?.id) {
-        return res.status(401).json({ error: "InvalidSessionToken" });
-      }
-
-      const userId = userData.user.id;
-
-      // profiles.role 체크
-      const { data: profile, error: profErr } = await supabase
-        .from("profiles")
-        .select("role")
-        .eq("user_id", userId)
-        .single();
-
-      if (profErr || !profile) {
-        return res.status(403).json({ error: "ProfileNotFound" });
-      }
-      if (profile.role !== "admin") {
-        return res.status(403).json({ error: "AdminOnly" });
-      }
-
-      req.adminUserId = userId;
-      next();
-    } catch (e) {
-      return res.status(500).json({ error: String(e?.message || e) });
-    }
   }
 
   // 목록
@@ -61,7 +19,7 @@ export default function jobsRouter({ supabase, adminToken }) {
       let q = supabase
         .from("jobs")
         .select(
-          "id, chat_id, status, status_reason, confirmed_at, customer_name, customer_phone, from_address, to_address, quote_amount, deposit_amount, balance_amount, created_at, updated_at"
+          "id, chat_id, status, status_reason, ops_status, confirmed_at, customer_name, customer_phone, from_address, to_address, quote_amount, deposit_amount, balance_amount, created_at, updated_at"
         )
         .order("updated_at", { ascending: false })
         .limit(limit);
@@ -81,7 +39,7 @@ export default function jobsRouter({ supabase, adminToken }) {
   router.get("/:chatId", requireAdmin, requireSupabase, async (req, res) => {
     try {
       const chatId = String(req.params.chatId || "").trim();
-      if (!chatId) return res.status(400).json({ error: "chatId required" });
+      if (!chatId) return res.status(400).json({ ok: false, error: "chatId required" });
 
       const { data, error } = await supabase
         .from("jobs")
@@ -90,7 +48,47 @@ export default function jobsRouter({ supabase, adminToken }) {
         .maybeSingle();
 
       if (error) throw error;
-      if (!data) return res.status(404).json({ error: "Not found" });
+      if (!data) return res.status(404).json({ ok: false, error: "Not found" });
+
+      return res.json({ ok: true, data });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
+  // (선택) ops_status 변경 API — webhook와 완전 분리
+  // PATCH /jobs/:chatId/ops_status  { ops_status: "assigned" | "completed" | ... }
+  router.patch("/:chatId/ops_status", requireAdmin, requireSupabase, async (req, res) => {
+    try {
+      const chatId = String(req.params.chatId || "").trim();
+      const ops_status = String(req.body?.ops_status || "").trim();
+
+      if (!chatId) return res.status(400).json({ ok: false, error: "chatId required" });
+      if (!ops_status) return res.status(400).json({ ok: false, error: "ops_status required" });
+
+      // 허용값 화이트리스트
+      const ALLOWED = new Set([
+        "unassigned",
+        "assigned",
+        "in_transit",
+        "completed",
+        "settled",
+        "closed",
+        "canceled",
+      ]);
+      if (!ALLOWED.has(ops_status)) {
+        return res.status(400).json({ ok: false, error: "Invalid ops_status" });
+      }
+
+      const { data, error } = await supabase
+        .from("jobs")
+        .update({ ops_status, updated_at: new Date().toISOString() })
+        .eq("chat_id", chatId)
+        .select("*")
+        .maybeSingle();
+
+      if (error) throw error;
+      if (!data) return res.status(404).json({ ok: false, error: "Not found" });
 
       return res.json({ ok: true, data });
     } catch (e) {

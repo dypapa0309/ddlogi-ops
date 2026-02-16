@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DDLOGI OPS 로그인</title>
+</head>
+<body>
+  <h1>DDLOGI OPS 로그인</h1>
+
+  <form id="loginForm">
+    <div>
+      <label>이메일</label><br/>
+      <input id="email" type="email" required />
+    </div>
+    <div style="margin-top:10px;">
+      <label>비밀번호</label><br/>
+      <input id="password" type="password" required />
+    </div>
+
+    <div style="margin-top:14px;">
+      <button type="submit">로그인</button>
+      <button type="button" id="logoutBtn" style="display:none;">로그아웃</button>
+    </div>
+  </form>
+
+  <p id="msg" style="margin-top:12px;"></p>
+
+  <!-- Supabase SDK -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <!-- config -->
+  <script src="/config.js"></script>
+  <!-- shared auth -->
+  <script src="/apps/shared/auth.js"></script>
+  <!-- page -->
+  <script src="./app.js"></script>
+</body>
+</html>

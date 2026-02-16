@@ -1,30 +1,39 @@
-// functions/channel-webhook/middlewares/adminAuth.js
-const { createClient } = require("@supabase/supabase-js");
+// functions/channel-webhook/middlewares/adminAuth.js (ESM)
+import { createClient } from "@supabase/supabase-js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-// (옵션) 레거시 토큰 유지하고 싶으면 사용
+// (옵션) 레거시 토큰 병행 (있으면만)
 const LEGACY_ADMIN_TOKEN = process.env.ADMIN_API_TOKEN;
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   console.warn("[adminAuth] Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
 }
 
-const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-  auth: { persistSession: false, autoRefreshToken: false },
-});
+const supabaseAdmin =
+  SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
+    ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+        auth: { persistSession: false, autoRefreshToken: false },
+      })
+    : null;
 
-module.exports = async function adminAuth(req, res, next) {
+export async function requireAdmin(req, res, next) {
   try {
+    // 0) supabase 준비 체크
+    if (!supabaseAdmin) {
+      return res.status(503).json({ ok: false, error: "SUPABASE_NOT_CONFIGURED" });
+    }
+
     // 1) Bearer JWT 우선
-    const authHeader = req.headers.authorization || "";
+    const authHeader = String(req.headers.authorization || "");
     const match = authHeader.match(/^Bearer\s+(.+)$/i);
     const bearerToken = match?.[1];
 
     if (bearerToken) {
       // ✅ JWT로 유저 검증
       const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(bearerToken);
+
       if (userErr || !userData?.user?.id) {
         return res.status(401).json({ ok: false, error: "Invalid session token" });
       }
@@ -49,14 +58,14 @@ module.exports = async function adminAuth(req, res, next) {
       return next();
     }
 
-    // 2) (옵션) 기존 x-admin-token 병행
+    // 2) (옵션) 레거시 x-admin-token 병행
     if (LEGACY_ADMIN_TOKEN) {
-      const token = req.headers["x-admin-token"];
+      const token = String(req.headers["x-admin-token"] || "");
       if (token && token === LEGACY_ADMIN_TOKEN) return next();
     }
 
     return res.status(401).json({ ok: false, error: "Unauthorized" });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message || String(e) });
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
   }
-};
+}
