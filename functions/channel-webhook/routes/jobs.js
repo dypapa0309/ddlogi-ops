@@ -1,9 +1,11 @@
 // functions/channel-webhook/routes/jobs.js (ESM)
 import { Router } from "express";
-import { requireAdmin } from "../middlewares/adminAuth.js";
+import { requireAdminFactory } from "../middlewares/adminAuth.js";
 
-export default function jobsRouter({ supabase }) {
+export default function jobsRouter({ supabase, adminToken }) {
   const router = Router();
+
+  const requireAdmin = requireAdminFactory(adminToken);
 
   function requireSupabase(req, res, next) {
     if (!supabase) return res.status(503).json({ error: "SUPABASE_NOT_CONFIGURED" });
@@ -56,8 +58,7 @@ export default function jobsRouter({ supabase }) {
     }
   });
 
-  // (선택) ops_status 변경 API — webhook와 완전 분리
-  // PATCH /jobs/:chatId/ops_status  { ops_status: "assigned" | "completed" | ... }
+  // PATCH ops_status
   router.patch("/:chatId/ops_status", requireAdmin, requireSupabase, async (req, res) => {
     try {
       const chatId = String(req.params.chatId || "").trim();
@@ -66,7 +67,6 @@ export default function jobsRouter({ supabase }) {
       if (!chatId) return res.status(400).json({ ok: false, error: "chatId required" });
       if (!ops_status) return res.status(400).json({ ok: false, error: "ops_status required" });
 
-      // 허용값 화이트리스트
       const ALLOWED = new Set([
         "unassigned",
         "assigned",
