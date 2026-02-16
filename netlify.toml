@@ -1,14 +1,13 @@
-[[redirects]]
-  from = "/admin"
-  to = "/apps/admin/"
-  status = 301
+[build]
+  publish = "."
+  command = ""
 
 [[redirects]]
-  from = "/admin/*"
-  to = "/apps/admin/:splat"
+  from = "/apps/admin/*"
+  to = "/apps/admin/index.html"
   status = 200
 
 [[redirects]]
-  from = "/apps/*"
-  to = "/apps/:splat"
+  from = "/apps/auth/*"
+  to = "/apps/auth/index.html"
   status = 200
