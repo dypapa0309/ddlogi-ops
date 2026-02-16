@@ -1,3 +1,4 @@
+
 const $ = (id) => document.getElementById(id);
 
 const LS_BASE = "ddlogi_admin_base";
@@ -508,30 +509,48 @@ function bindEvents() {
     loadSavedBase();
     bindEvents();
 
-    // ✅ auth 로드 실패 케이스를 '친절하게' 보여주기
-    if (!window.DDLOGI_AUTH || typeof window.DDLOGI_AUTH.requireRole !== "function") {
+    // ✅ auth 로드 체크
+    if (!window.DDLOGI_AUTH || typeof window.DDLOGI_AUTH.getSession !== "function") {
       showAuthHelp(
         `auth.js 로드에 실패했어요.<br/>
-         1) 배포 후 <b>/apps/shared/auth.js</b>가 200인지 확인<br/>
-         2) index.html에서 <b>&lt;script src="/apps/shared/auth.js"&gt;</b> 경로 확인<br/>
+         1) 배포 후 <b>/shared/auth.js</b>가 200인지 확인<br/>
+         2) index.html에서 <b>&lt;script src="/shared/auth.js"&gt;</b> 경로 확인<br/>
          3) Netlify redirects에 <b>/apps/* → /apps/:splat (200)</b> 규칙이 있어야 새로고침 404가 안 납니다.`
       );
-      setStatus("auth.js 미로드 (requireRole 없음)", false);
+      setStatus("auth.js 미로드 (DDLOGI_AUTH 없음)", false);
+      location.href = "/apps/auth/?next=/apps/admin/";
+      return;
+    }
+
+    // ✅ 세션 확인 → 없으면 로그인으로
+    const session = await window.DDLOGI_AUTH.getSession();
+    if (!session) {
+      location.href = "/apps/auth/?next=/apps/admin/";
+      return;
+    }
+
+    // ✅ 권한 체크 (admin)
+    if (typeof window.DDLOGI_AUTH.requireRole !== "function") {
+      setStatus("requireRole 없음 (auth.js 수정 필요)", false);
+      location.href = "/apps/auth/?next=/apps/admin/";
       return;
     }
 
     const ctx = await window.DDLOGI_AUTH.requireRole("admin");
-    if (!ctx) return; // 가드가 로그인 페이지로 보내는 구조
+    if (!ctx?.session?.access_token) {
+      setStatus("requireRole이 session을 반환하지 않음 (auth.js 수정 필요)", false);
+      return;
+    }
 
     ACCESS_TOKEN = ctx.session.access_token;
 
     $("diag").textContent = `ready / base=${getBase()}`;
     setStatus("준비 완료", true);
 
-    // 최초 로드
     await refresh();
   } catch (e) {
     setConn(false, "연결 끊김");
     setStatus(e.message || String(e), false);
   }
 })();
+

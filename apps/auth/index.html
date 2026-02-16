@@ -4,9 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>디디운송 | 운영자 로그인</title>
-
-  <!-- 절대경로로 통일 -->
-  <link rel="stylesheet" href="/apps/auth/styles.css?v=20260216-6" />
+  <link rel="stylesheet" href="/apps/auth/styles.css?v=1" />
 </head>
 <body>
   <main class="wrap">
@@ -37,15 +35,11 @@
     </div>
   </main>
 
-  <!-- JS는 한 번씩만 -->
-  <link rel="stylesheet" href="/apps/auth/styles.css?v=20260216-5" />
-
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="/config-auth.js?v=20260217-1"></script>
-<script src="/shared/supabase-client.js?v=20260217-1"></script>
-<script src="/shared/auth.js?v=20260217-1"></script>
-<script src="/apps/auth/app.js?v=20260217-1"></script>
-
-
+  <!-- 스크립트 로딩 순서 중요 -->
+  <script src="/config-auth.js?v=1"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="/shared/supabase-client.js?v=1"></script>
+  <script src="/shared/auth.js?v=1"></script>
+  <script src="/apps/auth/app.js?v=1"></script>
 </body>
 </html>
