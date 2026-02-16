@@ -1,38 +1,47 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ko">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>DDLOGI OPS 로그인</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>디디운송 | 운영자 로그인</title>
+
+  <!-- 절대경로로 통일 -->
+  <link rel="stylesheet" href="/apps/auth/styles.css?v=20260216-6" />
 </head>
 <body>
-  <h1>DDLOGI OPS 로그인</h1>
+  <main class="wrap">
+    <div class="card">
+      <h1 class="h1">운영자 로그인</h1>
+      <p class="sub">관리자 계정으로만 접속할 수 있습니다.</p>
 
-  <form id="loginForm">
-    <div>
-      <label>이메일</label><br/>
-      <input id="email" type="email" required />
+      <div class="field">
+        <label for="email">이메일</label>
+        <input id="email" type="email" placeholder="admin@..." autocomplete="email" />
+      </div>
+
+      <div class="field">
+        <label for="pw">비밀번호</label>
+        <input id="pw" type="password" placeholder="••••••••" autocomplete="current-password" />
+      </div>
+
+      <button id="btnLogin" class="btn btn-primary">로그인</button>
+
+      <div class="row between mt12">
+        <span id="msg" class="msg">-</span>
+        <button id="btnLogout" class="btn btn-ghost" type="button">로그아웃</button>
+      </div>
+
+      <div class="hint mt12">
+        로그인 후 자동으로 권한(role)을 확인합니다. (profiles.role = "admin")
+      </div>
     </div>
-    <div style="margin-top:10px;">
-      <label>비밀번호</label><br/>
-      <input id="password" type="password" required />
-    </div>
+  </main>
 
-    <div style="margin-top:14px;">
-      <button type="submit">로그인</button>
-      <button type="button" id="logoutBtn" style="display:none;">로그아웃</button>
-    </div>
-  </form>
-
-  <p id="msg" style="margin-top:12px;"></p>
-
-  <!-- Supabase SDK -->
+  <!-- JS는 한 번씩만 -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <!-- config -->
-  <script src="/config.js"></script>
-  <!-- shared auth -->
-  <script src="/apps/shared/auth.js"></script>
-  <!-- page -->
-  <script src="./app.js"></script>
+  <script src="/config.js?v=20260216-6"></script>
+  <script src="/shared/supabase-client.js?v=20260216-6"></script>
+  <script src="/shared/auth.js?v=20260216-6"></script>
+  <script src="/apps/auth/app.js?v=20260216-6"></script>
 </body>
 </html>

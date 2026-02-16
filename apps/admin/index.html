@@ -3,102 +3,218 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>DDLOGI OPS Admin</title>
-  <style>
-    body{font-family:-apple-system,BlinkMacSystemFont,Pretendard,system-ui,sans-serif;margin:0;background:#0b1220;color:#fff}
-    .wrap{max-width:1100px;margin:0 auto;padding:20px}
-    .card{background:#111827;border-radius:16px;padding:16px;margin-bottom:14px}
-    input,select,button{border-radius:10px;border:1px solid #263247;background:#0f172a;color:#fff;padding:10px}
-    button{cursor:pointer}
-    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-    .muted{color:#94a3b8}
-    table{width:100%;border-collapse:collapse}
-    th,td{padding:10px;border-bottom:1px solid #263247;vertical-align:top}
-    th{color:#94a3b8;font-weight:600;text-align:left}
-    .pill{display:inline-block;padding:4px 10px;border-radius:999px;background:#1f2937}
-    .ok{color:#22c55e}
-    .bad{color:#ef4444}
-    .click{cursor:pointer;text-decoration:underline}
-    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-  </style>
+  <title>디디운송 운영대시보드</title>
+  <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
-  <div class="wrap">
-    <h1 style="margin:0 0 12px;">DDLOGI OPS Admin</h1>
-    <p class="muted" style="margin:0 0 18px;">Render API를 조회해 jobs 상태를 확인합니다.</p>
-
-    <div class="card">
-      <div class="row">
-        <label class="muted">API Base</label>
-        <input id="baseUrl" style="min-width:360px" value="https://ddlogi-ops.onrender.com" />
-
-        
+  <header class="top">
+    <div class="wrap topInner">
+      <div>
+        <div class="titleRow">
+          <h1 class="h1">디디운송 운영대시보드</h1>
+          <span id="connPill" class="pill pill-muted">연결 확인중</span>
+        </div>
+        <p class="sub">오늘 일정 기준으로 예약 상태를 관리합니다.</p>
       </div>
-      <div class="muted" style="margin-top:10px;">
-        상태: <span id="statusText" class="mono">-</span>
-      </div>
-    </div>
 
-    <div class="card">
-      <div class="row">
-        <label class="muted">Status</label>
-        <select id="statusFilter">
-          <option value="">전체</option>
-          <option value="draft">draft</option>
-          <option value="quoted">quoted</option>
-          <option value="pending_confirm">pending_confirm</option>
-          <option value="confirmed">confirmed</option>
-          <option value="canceled">canceled</option>
-        </select>
-
-        <label class="muted">Limit</label>
-        <select id="limit">
-          <option>20</option>
-          <option>50</option>
-          <option>100</option>
-          <option>200</option>
-        </select>
-
-        <button id="refreshBtn">새로고침</button>
+      <div class="topActions">
+        <button id="btnRefresh" class="btn btn-primary">목록 업데이트</button>
+        <button id="btnSettings" class="btn" aria-label="설정">⚙️ 설정</button>
       </div>
     </div>
+  </header>
 
-    <div class="card">
-      <div class="row" style="justify-content:space-between;">
-        <div>결과: <span id="count">0</span>건</div>
-        <div class="muted">행 클릭 → 단건 상세 조회</div>
+  <main class="wrap">
+    <!-- 상태/오류 -->
+    <div class="card statusCard">
+      <div class="statusLine">
+        <span class="muted">상태</span>
+        <span id="statusText" class="mono">-</span>
+      </div>
+      <div id="authHelp" class="hint" style="display:none;"></div>
+    </div>
+
+    <!-- 탭 -->
+    <div class="tabs" role="tablist" aria-label="상태 탭">
+      <button class="tab is-active" data-tab="all" role="tab">전체</button>
+      <button class="tab" data-tab="quoted" role="tab">견적완료</button>
+      <button class="tab" data-tab="pending_confirm" role="tab">예약대기</button>
+      <button class="tab" data-tab="confirmed" role="tab">예약확정</button>
+      <button class="tab" data-tab="canceled" role="tab">취소</button>
+    </div>
+
+    <!-- KPI -->
+    <section class="kpiGrid" aria-label="요약 카드">
+      <div class="kpi card">
+        <div class="kpiLabel">예약확정</div>
+        <div class="kpiValue" id="kpiConfirmed">0</div>
+        <div class="kpiHint">오늘 기준</div>
+      </div>
+      <div class="kpi card">
+        <div class="kpiLabel">예약대기</div>
+        <div class="kpiValue" id="kpiPending">0</div>
+        <div class="kpiHint">오늘 기준</div>
+      </div>
+      <div class="kpi card">
+        <div class="kpiLabel">견적완료</div>
+        <div class="kpiValue" id="kpiQuoted">0</div>
+        <div class="kpiHint">오늘 기준</div>
+      </div>
+      <div class="kpi card">
+        <div class="kpiLabel">취소</div>
+        <div class="kpiValue" id="kpiCanceled">0</div>
+        <div class="kpiHint">오늘 기준</div>
+      </div>
+    </section>
+
+    <!-- 필터 -->
+    <section class="card filterCard">
+      <div class="row">
+        <div class="field">
+          <label class="muted" for="dateFilter">날짜</label>
+          <select id="dateFilter" class="input">
+            <option value="today">오늘</option>
+            <option value="all">전체</option>
+          </select>
+        </div>
+
+        <div class="field grow">
+          <label class="muted" for="q">검색</label>
+          <input id="q" class="input" placeholder="고객명 / 전화(일부) / 주소 키워드" />
+        </div>
+
+        <div class="field">
+          <label class="muted" for="limit">불러오기</label>
+          <select id="limit" class="input">
+            <option>20</option>
+            <option>50</option>
+            <option>100</option>
+            <option>200</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label class="muted" for="sort">정렬</label>
+          <select id="sort" class="input">
+            <option value="updated_desc">업데이트 최신순</option>
+            <option value="schedule_asc">일정 빠른순</option>
+          </select>
+        </div>
       </div>
 
-      <div style="overflow:auto;margin-top:10px;">
+      <div class="row between mt10">
+        <div class="muted">결과: <b id="count">0</b>건</div>
+        <div class="muted">행 클릭 → 상세(메모/필드/원문 없이 요약)</div>
+      </div>
+    </section>
+
+    <!-- 리스트 -->
+    <section class="card tableCard">
+      <div class="tableWrap">
         <table>
           <thead>
             <tr>
-              <th>updated</th>
-              <th>status</th>
-              <th>chat_id</th>
-              <th>from → to</th>
-              <th>금액</th>
-              <th>confirmed_at</th>
+              <th style="width:110px;">상태</th>
+              <th style="width:140px;">일정</th>
+              <th style="width:160px;">고객</th>
+              <th>출발 → 도착</th>
+              <th style="width:220px;">짐·옵션</th>
+              <th style="width:220px;">금액</th>
+              <th style="width:110px;">업데이트</th>
             </tr>
           </thead>
           <tbody id="tbody"></tbody>
         </table>
       </div>
-    </div>
+    </section>
+  </main>
 
-    <div class="card" id="detailCard" style="display:none;">
-      <div class="row" style="justify-content:space-between;">
-        <div><b>상세</b> <span class="muted">(jobs/:chatId)</span></div>
-        <button id="closeDetail">닫기</button>
+  <!-- 상세 패널 -->
+  <aside id="drawer" class="drawer" aria-hidden="true">
+    <div class="drawerBack" id="drawerBack"></div>
+    <div class="drawerPanel">
+      <div class="drawerHead">
+        <div>
+          <div class="drawerTitle">상세</div>
+          <div class="drawerSub muted" id="drawerSub">-</div>
+        </div>
+        <button id="drawerClose" class="btn">닫기</button>
       </div>
-      <pre id="detail" style="white-space:pre-wrap;word-break:break-word;margin:12px 0 0;" class="mono"></pre>
+
+      <div class="drawerBody">
+        <div class="detailGrid">
+          <div class="detailCard">
+            <div class="detailLabel muted">상태</div>
+            <div class="detailValue" id="dStatus">-</div>
+          </div>
+          <div class="detailCard">
+            <div class="detailLabel muted">일정</div>
+            <div class="detailValue" id="dSchedule">-</div>
+          </div>
+          <div class="detailCard">
+            <div class="detailLabel muted">고객</div>
+            <div class="detailValue" id="dCustomer">-</div>
+          </div>
+          <div class="detailCard">
+            <div class="detailLabel muted">출발 → 도착</div>
+            <div class="detailValue" id="dRoute">-</div>
+          </div>
+        </div>
+
+        <div class="detailBlock">
+          <div class="muted mb6">짐·옵션 요약</div>
+          <div id="dOptions" class="detailBox">-</div>
+        </div>
+
+        <div class="detailBlock">
+          <div class="muted mb6">금액</div>
+          <div id="dMoney" class="detailBox mono">-</div>
+        </div>
+
+        <div class="detailBlock">
+          <div class="muted mb6">원본 JSON(운영자용)</div>
+          <pre id="dJson" class="detailBox mono pre"></pre>
+          <div class="hint">※ 지금은 “조회/검증” 단계라 JSON도 남겨둠. 다음 단계에서 숨길 수 있어.</div>
+        </div>
+      </div>
     </div>
-  </div>
+  </aside>
 
- <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="/config.js"></script>
-<script src="/apps/shared/auth.js"></script>
-<script src="./app.js"></script>
+  <!-- 설정 패널 -->
+  <aside id="settings" class="drawer" aria-hidden="true">
+    <div class="drawerBack" id="settingsBack"></div>
+    <div class="drawerPanel">
+      <div class="drawerHead">
+        <div>
+          <div class="drawerTitle">설정</div>
+          <div class="drawerSub muted">개발/연결 설정은 여기만 숨겨둡니다.</div>
+        </div>
+        <button id="settingsClose" class="btn">닫기</button>
+      </div>
 
+      <div class="drawerBody">
+        <div class="detailBlock">
+          <div class="muted mb6">API Base</div>
+          <input id="baseUrl" class="input" value="https://ddlogi-ops.onrender.com" />
+          <div class="row mt10">
+            <button id="btnSaveBase" class="btn btn-primary">저장</button>
+            <button id="btnResetBase" class="btn">기본값</button>
+          </div>
+          <div class="hint">※ 운영 중엔 거의 건드릴 일 없음. 필요할 때만 변경.</div>
+        </div>
+
+        <div class="detailBlock">
+          <div class="muted mb6">진단</div>
+          <div id="diag" class="detailBox mono">-</div>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="../../config.js?v=20260216-5"></script>
+  <script src="../../shared/supabase-client.js?v=20260216-5"></script>
+  <script src="../../shared/auth.js?v=20260216-5"></script>
+  <script src="./app.js?v=20260216-5"></script>
 </body>
 </html>

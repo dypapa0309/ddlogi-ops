@@ -1,41 +1,81 @@
-// apps/auth/app.js
-(async () => {
-  const $ = (s) => document.querySelector(s);
-  const msg = $("#msg");
+const $ = (id) => document.getElementById(id);
 
-  const { supabase, getSession, getMyRole, signOut } = window.DDLOGI_AUTH;
+function setMsg(text, ok = null) {
+  const el = $("msg");
+  el.textContent = text || "-";
+  el.className = "msg" + (ok === true ? " ok" : ok === false ? " bad" : "");
+}
 
-  // 이미 로그인돼 있으면 역할에 맞게 보내기
-  const existing = await getSession().catch(() => null);
-  if (existing) {
-    const role = await getMyRole().catch(() => null);
-    if (role === "admin") location.href = "/apps/admin/";
-    else if (role === "driver") location.href = "/apps/driver/";
-  }
+function getNext() {
+  const p = new URLSearchParams(location.search);
+  return p.get("next") || "/apps/admin/";
+}
 
-  $("#loginForm").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    msg.textContent = "";
+async function signIn(email, password) {
+  // ✅ shared/supabase-client.js가 window.DDLOGI_SUPABASE를 만들어둠
+  const supabase = window.DDLOGI_SUPABASE;
+  if (!supabase) throw new Error("Supabase client not initialized. supabase-client.js 포함 확인");
 
-    const email = $("#email").value.trim();
-    const password = $("#password").value;
+  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+  if (error) throw error;
+  return data.session;
+}
 
-    try {
-      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) throw error;
+async function ensureAdmin() {
+  // shared/auth.js의 requireRole 재사용
+  const ctx = await window.DDLOGI_AUTH.requireRole("admin");
+  if (!ctx) throw new Error("권한 확인 실패 (admin만 가능)");
+  return ctx;
+}
 
-      const role = await getMyRole();
-      if (role === "admin") location.href = "/apps/admin/";
-      else location.href = "/apps/driver/";
-    } catch (err) {
-      msg.textContent = `로그인 실패: ${err.message || err}`;
+(async function boot() {
+  try {
+    setMsg("세션 확인 중…");
+
+    if (!window.DDLOGI_AUTH) throw new Error("DDLOGI_AUTH not ready. auth.js 포함 확인");
+
+    const session = await window.DDLOGI_AUTH.getSession?.();
+    if (session) {
+      await ensureAdmin();
+      setMsg("이미 로그인 되어있습니다. 이동합니다…", true);
+      location.href = getNext();
+      return;
     }
-  });
 
-  // (옵션) 로그아웃 버튼
-  const session = await getSession().catch(() => null);
-  if (session) {
-    $("#logoutBtn").style.display = "inline-block";
-    $("#logoutBtn").addEventListener("click", signOut);
+    setMsg("로그인 정보를 입력하세요.");
+  } catch (e) {
+    setMsg(e.message || String(e), false);
   }
 })();
+
+$("btnLogin").addEventListener("click", async () => {
+  try {
+    const email = $("email").value.trim();
+    const pw = $("pw").value;
+
+    if (!email || !pw) return setMsg("이메일/비밀번호를 입력하세요.", false);
+
+    setMsg("로그인 중…");
+    await signIn(email, pw);
+
+    setMsg("권한 확인 중…");
+    await ensureAdmin();
+
+    setMsg("완료. 이동합니다…", true);
+    location.href = getNext();
+  } catch (e) {
+    setMsg(e.message || String(e), false);
+  }
+});
+
+$("btnLogout").addEventListener("click", async () => {
+  try {
+    const supabase = window.DDLOGI_SUPABASE;
+    if (!supabase) throw new Error("Supabase client not initialized.");
+
+    await supabase.auth.signOut();
+    setMsg("로그아웃 완료", true);
+  } catch (e) {
+    setMsg(e.message || String(e), false);
+  }
+});
