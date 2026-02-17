@@ -1,30 +1,35 @@
 // /shared/auth.js
+// ✅ Supabase Auth + profiles.role 기반 권한 체크
 (() => {
-  function getSupabase() {
-    const sb = window.DDLOGI_SUPABASE;
-    if (!sb) throw new Error("DDLOGI_SUPABASE_NOT_READY: supabase-client.js 먼저 로드돼야 함");
-    return sb;
-  }
+  const supabase = window.DDLOGI_SUPABASE;
 
-  async function signInWithPassword(email, password) {
-    const supabase = getSupabase();
-    return await supabase.auth.signInWithPassword({ email, password });
-  }
-
-  async function signOut() {
-    const supabase = getSupabase();
-    return await supabase.auth.signOut();
+  function assertSupabase() {
+    if (!supabase) throw new Error("DDLOGI_SUPABASE_NOT_READY (supabase-client.js 로드/설정 확인)");
   }
 
   async function getSession() {
-    const supabase = getSupabase();
+    assertSupabase();
     const { data, error } = await supabase.auth.getSession();
     if (error) throw error;
     return data.session || null;
   }
 
+  async function signInWithPassword(email, password) {
+    assertSupabase();
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) throw error;
+    return data.session || null;
+  }
+
+  async function signOut() {
+    assertSupabase();
+    const { error } = await supabase.auth.signOut();
+    if (error) throw error;
+    return true;
+  }
+
   async function getMyRole() {
-    const supabase = getSupabase();
+    assertSupabase();
     const session = await getSession();
     if (!session?.user?.id) return null;
 
@@ -39,21 +44,25 @@
   }
 
   async function requireRole(requiredRole) {
+    // ✅ 세션 없으면 null
     const session = await getSession();
-    if (!session) {
-      location.href = "/apps/auth/";
-      return null;
-    }
+    if (!session) return null;
 
     const role = await getMyRole();
-    if (role !== requiredRole) {
-      // 권한 없으면 auth로 보내거나 메시지
-      location.href = "/apps/auth/?err=forbidden";
-      return null;
-    }
+    if (!role) return null;
+
+    if (requiredRole && role !== requiredRole) return null;
 
     return { session, role };
   }
 
-  window.DDLOGI_AUTH = { signInWithPassword, signOut, getSession, getMyRole, requireRole };
+  window.DDLOGI_AUTH = {
+    getSession,
+    signInWithPassword,
+    signOut,
+    getMyRole,
+    requireRole,
+  };
+
+  console.log("✅ DDLOGI_AUTH ready");
 })();

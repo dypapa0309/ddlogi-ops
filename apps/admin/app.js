@@ -1,14 +1,15 @@
-
+// /apps/admin/app.js
 const $ = (id) => document.getElementById(id);
 
 const LS_BASE = "ddlogi_admin_base";
-let ACCESS_TOKEN = "";
+const LS_ADMIN_TOKEN = "ddlogi_admin_api_token";
+
 let ACTIVE_TAB = "all";
-let RAW = [];      // 서버에서 받은 원본 목록
-let VIEW = [];     // 화면에 보여줄 가공 목록
+let RAW = [];
+let VIEW = [];
 
 // ------------------------------
-// UI 매핑 (사람 용어)
+// UI 매핑
 // ------------------------------
 const STATUS_LABEL = {
   draft: "접수중",
@@ -58,17 +59,18 @@ function showAuthHelp(html) {
 }
 
 // ------------------------------
-// Base URL 설정 (설정 drawer 안에 숨김)
+// Base URL 설정
 // ------------------------------
+function normalizeBase(str) {
+  return String(str || "").trim().replace(/\/+$/, "");
+}
+
 function loadSavedBase() {
   const el = $("baseUrl");
   if (!el) return;
-  const base = localStorage.getItem(LS_BASE) || el.value.trim();
-  el.value = base;
-}
-
-function normalizeBase(str) {
-  return String(str || "").trim().replace(/\/+$/, "");
+  const def = (window.DDLOGI_CONFIG?.apiBaseDefault || el.value || "").trim();
+  const base = localStorage.getItem(LS_BASE) || def;
+  el.value = normalizeBase(base);
 }
 
 function saveBase() {
@@ -83,34 +85,48 @@ function saveBase() {
 function resetBase() {
   const el = $("baseUrl");
   if (!el) return;
-  el.value = "https://ddlogi-ops.onrender.com";
+  el.value = window.DDLOGI_CONFIG?.apiBaseDefault || "https://ddlogi-ops.onrender.com";
   saveBase();
 }
 
 function getBase() {
-  const el = $("baseUrl");
-  return normalizeBase(el?.value);
+  return normalizeBase($("baseUrl")?.value);
 }
 
 // ------------------------------
-// API
+// ADMIN_API_TOKEN 설정
+// ------------------------------
+function loadSavedAdminToken() {
+  const el = $("adminToken");
+  if (!el) return;
+  el.value = localStorage.getItem(LS_ADMIN_TOKEN) || "";
+}
+
+function getAdminApiToken() {
+  return (localStorage.getItem(LS_ADMIN_TOKEN) || "").trim();
+}
+
+// ------------------------------
+// API (Render /jobs는 ADMIN_API_TOKEN로 인증)
 // ------------------------------
 async function apiGet(path) {
   const base = getBase();
   if (!base) throw new Error("Base URL empty");
-  if (!ACCESS_TOKEN) throw new Error("No session token. 로그인 상태 확인 필요");
+
+  const adminToken = getAdminApiToken();
+  if (!adminToken) throw new Error("ADMIN_API_TOKEN이 없습니다. 설정(⚙️)에서 입력 후 저장하세요.");
 
   const res = await fetch(base + path, {
     method: "GET",
     headers: {
-      "Authorization": "Bearer " + ACCESS_TOKEN,
+      "Authorization": "Bearer " + adminToken,
       "Content-Type": "application/json",
     },
     credentials: "omit",
   });
 
-  if (res.status === 401) throw new Error("401 (로그인/토큰 만료)");
-  if (res.status === 403) throw new Error("403 (관리자 권한/허용 Origin 확인)");
+  if (res.status === 401) throw new Error("401 (ADMIN_API_TOKEN 불일치)");
+  if (res.status === 403) throw new Error("403 (CORS/허용 Origin 확인: ADMIN_ALLOWED_ORIGINS)");
 
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
@@ -131,7 +147,6 @@ function fmtMoney(n) {
 
 function maskPhone(s) {
   const t = String(s || "").replace(/\s+/g, "");
-  // 01012341234 / 010-1234-1234 형태 대충 커버
   const m = t.match(/(01[016789])[-]?(\d{3,4})[-]?(\d{4})/);
   if (!m) return s || "-";
   return `${m[1]}-${m[2][0]}***-${m[3]}`;
@@ -158,7 +173,6 @@ function relTime(iso) {
 }
 
 function fmtSchedule(row) {
-  // 너 DB 필드가 아직 확정 전이라 가능한 후보를 넓게 잡음
   const date = row?.move_date || row?.date || row?.schedule_date || row?.reserved_date || "";
   const time = row?.time_slot_label || row?.time_slot || row?.reserved_time || row?.move_time || "";
   if (!date && !time) return "-";
@@ -172,14 +186,11 @@ function routeText(row) {
 }
 
 function optionsText(row) {
-  // 아직 필드가 유동적이라 후보형으로 모아줌 (없으면 -)
   const parts = [];
 
-  // 박스/짐양
   const box = row?.box_count || row?.boxes || row?.box_range || row?.items_box || "";
   if (box) parts.push(`박스: ${box}`);
 
-  // 버려주세요
   const throwUsed = row?.throw_used ?? row?.throw ?? row?.trash ?? "";
   if (throwUsed !== "" && throwUsed != null) {
     const v = String(throwUsed).toLowerCase();
@@ -187,12 +198,10 @@ function optionsText(row) {
     else if (v === "false" || v === "0" || v === "no" || v === "미사용") parts.push("버려주세요: 미사용");
   }
 
-  // 작업(상하차 도움)
   const workFrom = row?.work_from ?? row?.from_work ?? row?.from_help ?? "";
   const workTo = row?.work_to ?? row?.to_work ?? row?.to_help ?? "";
   if (workFrom || workTo) parts.push(`작업: 출발(${workFrom || "-"}) / 도착(${workTo || "-"})`);
 
-  // 가전/가구 요약
   const appliances = row?.appliances || row?.items_appliances || "";
   const furn = row?.furniture || row?.items_furniture || "";
   const sum = row?.items_summary || row?.items || "";
@@ -229,7 +238,6 @@ function matchesQuery(row, q) {
 }
 
 function isTodayByRow(row) {
-  // date 후보 필드들 중 하나라도 오늘과 같으면 오늘로 처리
   const today = new Date();
   const y = today.getFullYear();
   const m = String(today.getMonth() + 1).padStart(2, "0");
@@ -257,7 +265,6 @@ function sortRows(rows) {
     return cloned;
   }
 
-  // updated 최신순 (기본)
   cloned.sort((a, b) => {
     const at = Date.parse(a?.updated_at || a?.created_at || "");
     const bt = Date.parse(b?.updated_at || b?.created_at || "");
@@ -302,40 +309,33 @@ function renderTable(rows) {
   rows.forEach((row) => {
     const tr = document.createElement("tr");
 
-    // 상태
     const sTd = document.createElement("td");
     sTd.appendChild(statusBadge(row.status));
     tr.appendChild(sTd);
 
-    // 일정
     const schTd = document.createElement("td");
     schTd.innerHTML = `<div>${fmtSchedule(row)}</div><div class="small">${row?.confirmed_at ? "확정: " + String(row.confirmed_at).slice(0,16).replace("T"," ") : ""}</div>`;
     tr.appendChild(schTd);
 
-    // 고객
     const cTd = document.createElement("td");
     const nm = row?.customer_name || row?.name || "-";
     const ph = maskPhone(row?.phone || row?.customer_phone || "");
     cTd.innerHTML = `<div><b>${nm}</b></div><div class="small">${ph || "-"}</div>`;
     tr.appendChild(cTd);
 
-    // 출발 → 도착
     const rTd = document.createElement("td");
     rTd.textContent = routeText(row);
     tr.appendChild(rTd);
 
-    // 옵션
     const oTd = document.createElement("td");
     oTd.textContent = optionsText(row);
     tr.appendChild(oTd);
 
-    // 금액
     const mTd = document.createElement("td");
     mTd.className = "mono";
     mTd.textContent = moneyText(row);
     tr.appendChild(mTd);
 
-    // 업데이트
     const uTd = document.createElement("td");
     uTd.className = "small";
     uTd.textContent = relTime(row?.updated_at || row?.created_at);
@@ -352,20 +352,16 @@ function applyView() {
 
   let rows = [...RAW];
 
-  // 탭 필터
   if (ACTIVE_TAB !== "all") {
     rows = rows.filter((r) => (r?.status || "draft") === ACTIVE_TAB);
   }
 
-  // 날짜 필터
   if (dateMode !== "all") {
     rows = rows.filter(isTodayByRow);
   }
 
-  // 검색
   if (q) rows = rows.filter((r) => matchesQuery(r, q));
 
-  // 정렬
   rows = sortRows(rows);
 
   VIEW = rows;
@@ -375,7 +371,7 @@ function applyView() {
 }
 
 // ------------------------------
-// 상세 Drawer
+// Drawer
 // ------------------------------
 function openDrawer(id) {
   const el = $(id);
@@ -389,26 +385,23 @@ function closeDrawer(id) {
 }
 
 function openDetail(row) {
-  // chat_id는 화면에 숨기되, detail sub에만 표시(내부 확인용)
   const chatId = row?.chat_id || row?.chatId || row?.id || "-";
   $("drawerSub").textContent = `내부 ID: ${chatId}`;
 
   $("dStatus").textContent = STATUS_LABEL[row?.status] || row?.status || "-";
   $("dSchedule").textContent = fmtSchedule(row);
+
   const nm = row?.customer_name || row?.name || "-";
   const ph = maskPhone(row?.phone || row?.customer_phone || "");
   $("dCustomer").textContent = `${nm} (${ph || "-"})`;
+
   $("dRoute").textContent = routeText(row);
   $("dOptions").textContent = optionsText(row);
   $("dMoney").textContent = moneyText(row);
 
-  // 단건 조회가 필요하면 여기서 /jobs/:chatId 호출도 가능
-  // 지금은 원본 row를 우선 보여주고, chatId가 있으면 추가로 불러옴
   $("dJson").textContent = JSON.stringify(row, null, 2);
-
   openDrawer("drawer");
 
-  // 가능하면 단건 상세 조회(서버가 /jobs/:chatId 지원)
   if (row?.chat_id) {
     apiGet(`/jobs/${encodeURIComponent(row.chat_id)}`)
       .then((json) => {
@@ -435,12 +428,11 @@ async function refresh() {
 
     const json = await apiGet(`/jobs?${qs.toString()}`);
 
-    // 서버 응답 형태: { count, data: [...] } 예상
     RAW = Array.isArray(json?.data) ? json.data : Array.isArray(json) ? json : [];
     setConn(true, "연결됨");
     setStatus("OK", true);
 
-    $("diag").textContent = `rows=${RAW.length} / tab=${ACTIVE_TAB} / base=${getBase()}`;
+    $("diag").textContent = `rows=${RAW.length} / tab=${ACTIVE_TAB} / base=${getBase()} / token=${getAdminApiToken() ? "saved" : "empty"}`;
 
     applyView();
   } catch (e) {
@@ -459,42 +451,54 @@ function setActiveTab(tab) {
     b.classList.toggle("is-active", b.dataset.tab === tab);
   });
 
-  // 탭 변경 시 즉시 refresh (서버 status 필터도 적용)
   refresh();
 }
 
 function bindEvents() {
-  // 탭
   document.querySelectorAll(".tab").forEach((b) => {
     b.addEventListener("click", () => setActiveTab(b.dataset.tab));
   });
 
-  // 필터
-  $("q").addEventListener("input", () => applyView());
-  $("dateFilter").addEventListener("change", () => applyView());
-  $("sort").addEventListener("change", () => applyView());
-  $("limit").addEventListener("change", () => refresh());
+  $("q")?.addEventListener("input", () => applyView());
+  $("dateFilter")?.addEventListener("change", () => applyView());
+  $("sort")?.addEventListener("change", () => applyView());
+  $("limit")?.addEventListener("change", () => refresh());
 
-  // 상단
-  $("btnRefresh").addEventListener("click", refresh);
+  $("btnRefresh")?.addEventListener("click", refresh);
 
-  // 상세 drawer
-  $("drawerClose").addEventListener("click", () => closeDrawer("drawer"));
-  $("drawerBack").addEventListener("click", () => closeDrawer("drawer"));
+  $("drawerClose")?.addEventListener("click", () => closeDrawer("drawer"));
+  $("drawerBack")?.addEventListener("click", () => closeDrawer("drawer"));
 
-  // 설정 drawer
-  $("btnSettings").addEventListener("click", () => openDrawer("settings"));
-  $("settingsClose").addEventListener("click", () => closeDrawer("settings"));
-  $("settingsBack").addEventListener("click", () => closeDrawer("settings"));
-  $("btnSaveBase").addEventListener("click", () => {
+  $("btnSettings")?.addEventListener("click", () => openDrawer("settings"));
+  $("settingsClose")?.addEventListener("click", () => closeDrawer("settings"));
+  $("settingsBack")?.addEventListener("click", () => closeDrawer("settings"));
+
+  $("btnSaveBase")?.addEventListener("click", () => {
     saveBase();
-    $("diag").textContent = `base=${getBase()}`;
+    $("diag").textContent = `base=${getBase()} / token=${getAdminApiToken() ? "saved" : "empty"}`;
     setStatus("Base URL 저장됨", true);
   });
-  $("btnResetBase").addEventListener("click", () => {
+
+  $("btnResetBase")?.addEventListener("click", () => {
     resetBase();
-    $("diag").textContent = `base=${getBase()}`;
+    $("diag").textContent = `base=${getBase()} / token=${getAdminApiToken() ? "saved" : "empty"}`;
     setStatus("Base URL 기본값으로 복원", true);
+  });
+
+  // ✅ ADMIN_API_TOKEN 저장/삭제
+  $("btnSaveAdminToken")?.addEventListener("click", () => {
+    const v = ($("adminToken")?.value || "").trim();
+    if (!v) return setStatus("ADMIN_API_TOKEN이 비었습니다", false);
+    localStorage.setItem(LS_ADMIN_TOKEN, v);
+    $("diag").textContent = `base=${getBase()} / token=saved`;
+    setStatus("ADMIN_API_TOKEN 저장됨", true);
+  });
+
+  $("btnClearAdminToken")?.addEventListener("click", () => {
+    localStorage.removeItem(LS_ADMIN_TOKEN);
+    if ($("adminToken")) $("adminToken").value = "";
+    $("diag").textContent = `base=${getBase()} / token=empty`;
+    setStatus("ADMIN_API_TOKEN 삭제됨", true);
   });
 }
 
@@ -507,44 +511,44 @@ function bindEvents() {
     setStatus("로그인/권한 확인 중…", true);
 
     loadSavedBase();
+    loadSavedAdminToken();
     bindEvents();
 
-    // ✅ auth 로드 체크
+    // ✅ shared/auth.js 로드 확인
     if (!window.DDLOGI_AUTH || typeof window.DDLOGI_AUTH.getSession !== "function") {
       showAuthHelp(
         `auth.js 로드에 실패했어요.<br/>
-         1) 배포 후 <b>/shared/auth.js</b>가 200인지 확인<br/>
-         2) index.html에서 <b>&lt;script src="/shared/auth.js"&gt;</b> 경로 확인<br/>
-         3) Netlify redirects에 <b>/apps/* → /apps/:splat (200)</b> 규칙이 있어야 새로고침 404가 안 납니다.`
+         1) <b>/shared/auth.js</b>가 실제로 존재하는지 확인<br/>
+         2) index.html 스크립트 경로가 <b>/shared/auth.js</b>인지 확인`
       );
       setStatus("auth.js 미로드 (DDLOGI_AUTH 없음)", false);
-      location.href = "/apps/auth/?next=/apps/admin/";
       return;
     }
 
-    // ✅ 세션 확인 → 없으면 로그인으로
+    // ✅ 세션 없으면(=Supabase 로그인 안됨) auth 앱으로 보내는 구조라면 여기서 이동
+    // 지금은 '문지기' 역할만: 세션 없으면 안내만
     const session = await window.DDLOGI_AUTH.getSession();
     if (!session) {
-      location.href = "/apps/auth/?next=/apps/admin/";
+      setStatus("Supabase 로그인 필요 (auth 앱에서 로그인 후 재접속)", false);
+      // 필요하면 여기서 이동:
+      // location.href = "/apps/auth/?next=/apps/admin/";
       return;
     }
 
-    // ✅ 권한 체크 (admin)
-    if (typeof window.DDLOGI_AUTH.requireRole !== "function") {
-      setStatus("requireRole 없음 (auth.js 수정 필요)", false);
-      location.href = "/apps/auth/?next=/apps/admin/";
-      return;
-    }
-
+    // ✅ admin role 체크(문지기)
     const ctx = await window.DDLOGI_AUTH.requireRole("admin");
-    if (!ctx?.session?.access_token) {
-      setStatus("requireRole이 session을 반환하지 않음 (auth.js 수정 필요)", false);
+    if (!ctx) {
+      setStatus("관리자 권한이 아닙니다 (profiles.role 확인)", false);
       return;
     }
 
-    ACCESS_TOKEN = ctx.session.access_token;
+    // ✅ 실제 API 호출은 ADMIN_API_TOKEN이 담당
+    if (!getAdminApiToken()) {
+      setStatus("⚙️ 설정에서 ADMIN_API_TOKEN 저장 후 사용하세요", false);
+      return;
+    }
 
-    $("diag").textContent = `ready / base=${getBase()}`;
+    $("diag").textContent = `ready / base=${getBase()} / token=saved`;
     setStatus("준비 완료", true);
 
     await refresh();
@@ -553,4 +557,3 @@ function bindEvents() {
     setStatus(e.message || String(e), false);
   }
 })();
-

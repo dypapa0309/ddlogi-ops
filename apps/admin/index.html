@@ -104,7 +104,7 @@
 
       <div class="row between mt10">
         <div class="muted">결과: <b id="count">0</b>건</div>
-        <div class="muted">행 클릭 → 상세(메모/필드/원문 없이 요약)</div>
+        <div class="muted">행 클릭 → 상세(요약)</div>
       </div>
     </section>
 
@@ -203,6 +203,17 @@
           <div class="hint">※ 운영 중엔 거의 건드릴 일 없음. 필요할 때만 변경.</div>
         </div>
 
+        <!-- ✅ 추가: ADMIN_API_TOKEN -->
+        <div class="detailBlock">
+          <div class="muted mb6">ADMIN_API_TOKEN</div>
+          <input id="adminToken" class="input" placeholder="ADMIN_API_TOKEN (Bearer 없이 토큰만)" />
+          <div class="row mt10">
+            <button id="btnSaveAdminToken" class="btn btn-primary">저장</button>
+            <button id="btnClearAdminToken" class="btn">삭제</button>
+          </div>
+          <div class="hint">※ Render의 ADMIN_API_TOKEN을 그대로 넣어.</div>
+        </div>
+
         <div class="detailBlock">
           <div class="muted mb6">진단</div>
           <div id="diag" class="detailBox mono">-</div>
@@ -211,10 +222,13 @@
     </div>
   </aside>
 
+  <!-- supabase-js CDN -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="../../config.js?v=20260216-5"></script>
-  <script src="../../shared/supabase-client.js?v=20260216-5"></script>
-  <script src="../../shared/auth.js?v=20260216-5"></script>
-  <script src="./app.js?v=20260216-5"></script>
+
+  <!-- ✅ 경로 최종 고정 -->
+  <script src="/config.js"></script>
+  <script src="/shared/supabase-client.js"></script>
+  <script src="/shared/auth.js"></script>
+  <script src="/apps/admin/app.js"></script>
 </body>
 </html>

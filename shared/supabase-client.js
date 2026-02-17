@@ -2,30 +2,26 @@
 (() => {
   const CFG = window.DDLOGI_CONFIG || {};
   const url = CFG.supabaseUrl;
-  const key = CFG.supabaseKey;
+  const key = CFG.supabaseAnonKey;
 
-  console.log("[DDLOGI] supabaseUrl:", url);
-  console.log("[DDLOGI] supabaseKey prefix/len:", String(key).slice(0, 10), String(key).length);
-
-  if (!url || !key) {
-    console.error("[DDLOGI] Missing supabaseUrl/supabaseKey. config.js not loaded?");
-    return;
-  }
-  if (!window.supabase?.createClient) {
-    console.error("[DDLOGI] supabase-js not loaded.");
+  if (!window.supabase || typeof window.supabase.createClient !== "function") {
+    console.error("❌ supabase-js CDN이 로드되지 않았습니다. index.html에 CDN 포함 확인");
     return;
   }
 
-  if (!window.__DDLOGI_SUPABASE__) {
-    window.__DDLOGI_SUPABASE__ = window.supabase.createClient(url, key, {
-      auth: {
-        storageKey: "ddlogi_auth_v1",
-        persistSession: true,
-        autoRefreshToken: true,
-        detectSessionInUrl: true,
-      },
-    });
+  if (!url || !key || String(key).includes("YOUR_")) {
+    console.error("❌ config.js의 supabaseUrl / supabaseAnonKey가 설정되지 않았습니다.");
+    return;
   }
 
-  window.DDLOGI_SUPABASE = window.__DDLOGI_SUPABASE__;
+  // ✅ 전역 1개만
+  window.DDLOGI_SUPABASE = window.supabase.createClient(url, key, {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+      detectSessionInUrl: true,
+    },
+  });
+
+  console.log("✅ DDLOGI_SUPABASE ready");
 })();

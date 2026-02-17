@@ -10,7 +10,7 @@
   <main class="wrap">
     <div class="card">
       <h1 class="h1">운영자 로그인</h1>
-      <p class="sub">관리자 계정으로만 접속할 수 있습니다.</p>
+      <p class="sub">관리자 계정(role=admin)만 접속할 수 있습니다.</p>
 
       <div class="field">
         <label for="email">이메일</label>
@@ -22,7 +22,7 @@
         <input id="pw" type="password" placeholder="••••••••" autocomplete="current-password" />
       </div>
 
-      <button id="btnLogin" class="btn btn-primary">로그인</button>
+      <button id="btnLogin" class="btn btn-primary" type="button">로그인</button>
 
       <div class="row between mt12">
         <span id="msg" class="msg">-</span>
@@ -30,16 +30,18 @@
       </div>
 
       <div class="hint mt12">
-        로그인 후 자동으로 권한(role)을 확인합니다. (profiles.role = "admin")
+        로그인 성공 시 next 경로로 이동합니다.
       </div>
     </div>
   </main>
 
-  <!-- 스크립트 로딩 순서 중요 -->
-  <script src="/config-auth.js?v=1"></script>
+  <!-- ✅ 로딩 순서 고정 (너 구조 기준) -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="/shared/supabase-client.js?v=1"></script>
-  <script src="/shared/auth.js?v=1"></script>
-  <script src="/apps/auth/app.js?v=1"></script>
+
+  <script src="/config.js"></script>
+  <script src="/shared/supabase-client.js"></script>
+  <script src="/shared/auth.js"></script>
+
+  <script src="/apps/auth/app.js"></script>
 </body>
 </html>
