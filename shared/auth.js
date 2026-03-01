@@ -39,7 +39,7 @@
 
     const { data, error } = await supabase
       .from("profiles")
-      .select("role, display_name")
+      .select("role, name")   // 🔥 display_name → name 으로 변경
       .eq("user_id", s.user.id)
       .maybeSingle();
 
@@ -56,7 +56,8 @@
       const role = prof?.role || null;
 
       if (!role) return { ok: false, reason: "NO_PROFILE" };
-      if (requiredRole && role !== requiredRole) return { ok: false, reason: "FORBIDDEN", role };
+      if (requiredRole && role !== requiredRole)
+        return { ok: false, reason: "FORBIDDEN", role };
 
       return { ok: true, session, role, profile: prof };
     } catch (e) {
