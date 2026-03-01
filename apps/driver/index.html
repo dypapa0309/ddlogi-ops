@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>DDLOGI OPS | Driver Calendar</title>
+  <link rel="stylesheet" href="/apps/admin/styles.css?v=2" />
+</head>
+<body>
+  <header class="top">
+    <div class="wrap topInner">
+      <div>
+        <div class="titleRow">
+          <h1 class="h1">기사 캘린더 (Driver)</h1>
+          <span id="connPill" class="pill pill-muted">연결 확인중</span>
+        </div>
+        <p class="sub">배정된 일정만 표시됩니다.</p>
+      </div>
+      <div class="topActions">
+        <button id="btnToday" class="btn">오늘</button>
+        <button id="btnPrev" class="btn">◀</button>
+        <button id="btnNext" class="btn">▶</button>
+        <button id="btnRefresh" class="btn btn-primary">새로고침</button>
+        <a class="btn btn-link" href="/apps/auth/">로그인/계정</a>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap grid2">
+    <section class="card">
+      <div class="row between">
+        <div class="monthTitle" id="monthTitle">-</div>
+        <div class="row">
+          <select id="statusFilter" class="input">
+            <option value="">전체</option>
+            <option value="confirmed">confirmed</option>
+            <option value="canceled">canceled</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="weekHead">
+        <div>일</div><div>월</div><div>화</div><div>수</div><div>목</div><div>금</div><div>토</div>
+      </div>
+      <div id="monthGrid" class="monthGrid"></div>
+
+      <div class="hint mt10" id="statusText">-</div>
+    </section>
+
+    <aside class="card side">
+      <div class="sideTitle" id="sideTitle">선택한 날짜</div>
+      <div id="sideList" class="sideList"></div>
+
+      <div class="divider"></div>
+
+      <div class="muted small">선택한 이벤트 상세</div>
+      <pre id="detailBox" class="debugBox mt10">{}</pre>
+
+      <div class="divider"></div>
+
+      <div class="muted small">운행 상태(ops_status)</div>
+      <select id="opsSelect" class="input mt10">
+        <option value="">(변경 안함)</option>
+        <option value="in_progress">in_progress</option>
+        <option value="completed">completed</option>
+      </select>
+      <button id="btnUpdateOps" class="btn btn-primary mt10">ops_status 업데이트</button>
+    </aside>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="/config.js"></script>
+  <script src="/shared/supabase-client.js"></script>
+  <script src="/shared/auth.js"></script>
+  <script src="/apps/driver/app.js"></script>
+</body>
+</html>

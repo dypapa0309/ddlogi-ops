@@ -1,10 +1,9 @@
 // /shared/auth.js
-// ✅ Supabase Auth + profiles.role 기반 권한 체크
 (() => {
   const supabase = window.DDLOGI_SUPABASE;
 
   function assertSupabase() {
-    if (!supabase) throw new Error("DDLOGI_SUPABASE_NOT_READY (supabase-client.js 로드/설정 확인)");
+    if (!supabase) throw new Error("DDLOGI_SUPABASE_NOT_READY");
   }
 
   async function getSession() {
@@ -12,6 +11,11 @@
     const { data, error } = await supabase.auth.getSession();
     if (error) throw error;
     return data.session || null;
+  }
+
+  async function getAccessToken() {
+    const s = await getSession();
+    return s?.access_token || null;
   }
 
   async function signInWithPassword(email, password) {
@@ -28,39 +32,44 @@
     return true;
   }
 
-  async function getMyRole() {
+  async function getMyProfile(session) {
     assertSupabase();
-    const session = await getSession();
-    if (!session?.user?.id) return null;
+    const s = session || (await getSession());
+    if (!s?.user?.id) return null;
 
     const { data, error } = await supabase
       .from("profiles")
-      .select("role")
-      .eq("user_id", session.user.id)
+      .select("role, display_name")
+      .eq("user_id", s.user.id)
       .maybeSingle();
 
     if (error) throw error;
-    return data?.role || null;
+    return data || null;
   }
 
   async function requireRole(requiredRole) {
-    // ✅ 세션 없으면 null
-    const session = await getSession();
-    if (!session) return null;
+    try {
+      const session = await getSession();
+      if (!session) return { ok: false, reason: "NO_SESSION" };
 
-    const role = await getMyRole();
-    if (!role) return null;
+      const prof = await getMyProfile(session);
+      const role = prof?.role || null;
 
-    if (requiredRole && role !== requiredRole) return null;
+      if (!role) return { ok: false, reason: "NO_PROFILE" };
+      if (requiredRole && role !== requiredRole) return { ok: false, reason: "FORBIDDEN", role };
 
-    return { session, role };
+      return { ok: true, session, role, profile: prof };
+    } catch (e) {
+      return { ok: false, reason: "AUTH_ERROR", detail: e?.message || String(e) };
+    }
   }
 
   window.DDLOGI_AUTH = {
     getSession,
+    getAccessToken,
     signInWithPassword,
     signOut,
-    getMyRole,
+    getMyProfile,
     requireRole,
   };
 

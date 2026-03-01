@@ -11,3 +11,8 @@
   from = "/apps/auth/*"
   to = "/apps/auth/index.html"
   status = 200
+
+[[redirects]]
+  from = "/apps/driver/*"
+  to = "/apps/driver/index.html"
+  status = 200

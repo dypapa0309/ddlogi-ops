@@ -1,12 +1,14 @@
-// /functions/channel-webhook/routes/jobs.js (ESM)
+// functions/channel-webhook/routes/jobs.js (ESM)
 import { Router } from "express";
-import { requireAdminJwtFactory } from "../middlewares/adminAuth.js";
+import { requireRoleJwtFactory } from "../middlewares/adminAuth.js";
 
 export default function jobsRouter({ supabase }) {
   const router = Router();
-  const requireAdmin = requireAdminJwtFactory({ supabase });
 
-  // 목록
+  const requireAdmin = requireRoleJwtFactory({ supabase, allowRoles: ["admin"] });
+  const requireAdminOrDriver = requireRoleJwtFactory({ supabase, allowRoles: ["admin", "driver"] });
+
+  // 목록(운영자)
   router.get("/", requireAdmin, async (req, res) => {
     try {
       const limit = Math.min(parseInt(req.query.limit || "50", 10), 200);
@@ -29,8 +31,8 @@ export default function jobsRouter({ supabase }) {
     }
   });
 
-  // 단건
-  router.get("/:chatId", requireAdmin, async (req, res) => {
+  // 단건(운영자 or 배정 기사)
+  router.get("/:chatId", requireAdminOrDriver, async (req, res) => {
     try {
       const chatId = String(req.params.chatId || "").trim();
       if (!chatId) return res.status(400).json({ error: "CHAT_ID_REQUIRED" });
@@ -44,28 +46,76 @@ export default function jobsRouter({ supabase }) {
       if (error) return res.status(500).json({ error: error.message });
       if (!data) return res.status(404).json({ error: "NOT_FOUND" });
 
+      if (req.role === "driver" && data.assigned_driver_id !== req.user_id) {
+        return res.status(403).json({ error: "FORBIDDEN_ASSIGNEE" });
+      }
+
       return res.json({ data });
     } catch (e) {
       return res.status(500).json({ error: e?.message || String(e) });
     }
   });
 
-  // (옵션) ops_status patch도 동일 requireAdmin으로 보호하면 됨
-  router.patch("/:chatId/ops_status", requireAdmin, async (req, res) => {
+  // ops_status 업데이트(운영자 or 배정 기사)
+  router.patch("/:chatId/ops_status", requireAdminOrDriver, async (req, res) => {
     try {
       const chatId = String(req.params.chatId || "").trim();
       const ops_status = String(req.body?.ops_status || "").trim();
       if (!chatId) return res.status(400).json({ error: "CHAT_ID_REQUIRED" });
       if (!ops_status) return res.status(400).json({ error: "OPS_STATUS_REQUIRED" });
 
+      const { data: existing, error: exErr } = await supabase
+        .from("jobs")
+        .select("assigned_driver_id")
+        .eq("chat_id", chatId)
+        .maybeSingle();
+
+      if (exErr) return res.status(500).json({ error: exErr.message });
+      if (!existing) return res.status(404).json({ error: "NOT_FOUND" });
+
+      if (req.role === "driver" && existing.assigned_driver_id !== req.user_id) {
+        return res.status(403).json({ error: "FORBIDDEN_ASSIGNEE" });
+      }
+
       const { data, error } = await supabase
         .from("jobs")
-        .update({ ops_status, updated_at: new Date().toISOString() })
+        .update({ ops_status })
         .eq("chat_id", chatId)
         .select("*")
         .maybeSingle();
 
       if (error) return res.status(500).json({ error: error.message });
+
+      return res.json({ data });
+    } catch (e) {
+      return res.status(500).json({ error: e?.message || String(e) });
+    }
+  });
+
+  // 기사 배정(운영자)
+  router.patch("/:chatId/assign_driver", requireAdmin, async (req, res) => {
+    try {
+      const chatId = String(req.params.chatId || "").trim();
+      const driver_user_id = String(req.body?.driver_user_id || "").trim();
+
+      if (!chatId) return res.status(400).json({ error: "CHAT_ID_REQUIRED" });
+      if (!driver_user_id) return res.status(400).json({ error: "DRIVER_USER_ID_REQUIRED" });
+
+      const { data, error } = await supabase
+        .from("jobs")
+        .update({ assigned_driver_id: driver_user_id })
+        .eq("chat_id", chatId)
+        .select("*")
+        .maybeSingle();
+
+      if (error) return res.status(500).json({ error: error.message });
+      if (!data) return res.status(404).json({ error: "NOT_FOUND" });
+
+      await supabase
+        .from("job_events")
+        .update({ assigned_driver_id: driver_user_id })
+        .eq("chat_id", chatId);
+
       return res.json({ data });
     } catch (e) {
       return res.status(500).json({ error: e?.message || String(e) });

@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>디디운송 | 운영자 로그인</title>
-  <link rel="stylesheet" href="/apps/auth/styles.css?v=1" />
+  <title>DDLOGI OPS | 로그인</title>
+  <link rel="stylesheet" href="/apps/auth/styles.css?v=2" />
 </head>
 <body>
   <main class="wrap">
     <div class="card">
-      <h1 class="h1">운영자 로그인</h1>
-      <p class="sub">관리자 계정(role=admin)만 접속할 수 있습니다.</p>
+      <h1 class="h1">로그인</h1>
+      <p class="sub">권한(role)에 따라 Admin/Driver 화면으로 이동합니다.</p>
 
       <div class="field">
         <label for="email">이메일</label>
@@ -30,18 +30,15 @@
       </div>
 
       <div class="hint mt12">
-        로그인 성공 시 next 경로로 이동합니다.
+        로그인 성공 시 권한에 따라 화면이 열립니다.
       </div>
     </div>
   </main>
 
-  <!-- ✅ 로딩 순서 고정 (너 구조 기준) -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-
   <script src="/config.js"></script>
   <script src="/shared/supabase-client.js"></script>
   <script src="/shared/auth.js"></script>
-
   <script src="/apps/auth/app.js"></script>
 </body>
 </html>

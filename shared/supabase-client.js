@@ -5,16 +5,15 @@
   const key = CFG.supabaseAnonKey;
 
   if (!window.supabase || typeof window.supabase.createClient !== "function") {
-    console.error("❌ supabase-js CDN이 로드되지 않았습니다. index.html에 CDN 포함 확인");
+    console.error("❌ supabase-js CDN not loaded");
     return;
   }
 
-  if (!url || !key || String(key).includes("YOUR_")) {
-    console.error("❌ config.js의 supabaseUrl / supabaseAnonKey가 설정되지 않았습니다.");
+  if (!url || !key) {
+    console.error("❌ config.js missing supabaseUrl / supabaseAnonKey");
     return;
   }
 
-  // ✅ 전역 1개만
   window.DDLOGI_SUPABASE = window.supabase.createClient(url, key, {
     auth: {
       persistSession: true,
