@@ -68,7 +68,8 @@ export default function jobsRouter({ supabase }) {
 
       const { data: existing, error: exErr } = await supabase
         .from("jobs")
-        .select("assigned_driver_id")
+        // 현재 ops_status도 함께 조회하여 변경 이력을 남길 수 있게 한다.
+        .select("id, assigned_driver_id, ops_status")
         .eq("chat_id", chatId)
         .maybeSingle();
 
@@ -87,6 +88,16 @@ export default function jobsRouter({ supabase }) {
         .maybeSingle();
 
       if (error) return res.status(500).json({ error: error.message });
+
+      // ops_status 변경 로그를 남긴다. 기존 상태와 다를 때만 기록한다.
+      if (existing && existing.ops_status && existing.ops_status !== ops_status && data && data.id) {
+        await supabase.from("job_events").insert({
+          job_id: data.id,
+          event_type: "ops_status_changed",
+          payload: { from: existing.ops_status, to: ops_status, actor: req.user_id },
+        });
+      }
+
       return res.json({ data });
     } catch (e) {
       return res.status(500).json({ error: e?.message || String(e) });

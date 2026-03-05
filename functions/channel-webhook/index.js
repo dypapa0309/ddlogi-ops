@@ -126,13 +126,26 @@ function extractMessageId(payload) {
   return payload?.entity?.id || payload?.message?.id || payload?.id || null;
 }
 
+// Attempt to derive the canonical chat/thread ID for a conversation.
+// ChannelTalk exposes a few different properties depending on the type of
+// message (user, bot, manager, system). In practice the order of these
+// candidates matters: `refers.userChat.id` and `refers.chat.id` refer
+// directly to the conversation thread, whereas the `entity` fields can
+// sometimes change when the system sends templated responses. By trying
+// the refers-based IDs first we ensure that all messages from the same
+// thread collapse under a single `chat_id` instead of being split into
+// multiple threads.
 function extractChatId(payload) {
   return (
+    // Prefer explicit userChat thread reference if available
+    payload?.refers?.userChat?.id ||
+    // Fallback to generic chat reference
+    payload?.refers?.chat?.id ||
+    // Fall back to entity-level identifiers
     payload?.entity?.chatId ||
     payload?.entity?.chat?.id ||
     payload?.entity?.chat?.chatId ||
-    payload?.refers?.userChat?.id ||
-    payload?.refers?.chat?.id ||
+    // Fall back to top-level chatId fields
     payload?.chatId ||
     payload?.chat_id ||
     null
@@ -141,11 +154,11 @@ function extractChatId(payload) {
 
 function debugChatIdSource(payload) {
   const candidates = [
+    ["refers.userChat.id", payload?.refers?.userChat?.id],
+    ["refers.chat.id", payload?.refers?.chat?.id],
     ["entity.chatId", payload?.entity?.chatId],
     ["entity.chat.id", payload?.entity?.chat?.id],
     ["entity.chat.chatId", payload?.entity?.chat?.chatId],
-    ["refers.userChat.id", payload?.refers?.userChat?.id],
-    ["refers.chat.id", payload?.refers?.chat?.id],
     ["chatId", payload?.chatId],
     ["chat_id", payload?.chat_id],
   ];
@@ -350,9 +363,12 @@ async function upsertJobAndEvent({ chatId, messageId, personType, text }) {
   const depositWeak = ["입금", "송금", "이체", "보낼게요", "입금할게요", "입금 예정", "송금 예정", "이체 예정"];
   const depositNeg = ["미입금", "입금 전", "입금전", "아직 입금", "아직 안", "안 했", "못했", "보류", "나중에 입금", "입금 못", "입금 안"];
 
-  const isUser = personType === "user";
+  // personType이 undefined/null이면 유저로 간주한다. manager는 상태 변경에 영향을 주지 않음.
+  const isUser = !personType || personType === "user";
   const isBot = personType === "bot";
-  const isRelevant = isUser || isBot; // prevent manager/internal notes from mutating customer/job facts
+  const isManager = personType === "manager";
+  // manager 메시지는 상태를 바꾸지 않고, 유저/봇 메시지만 의미 있다.
+  const isRelevant = !isManager;
 
   const hasCancel = isUser && containsAny(text, cancelKeywords);
   const hasProceed = isUser && containsAny(text, proceedKeywords);
@@ -366,8 +382,10 @@ async function upsertJobAndEvent({ chatId, messageId, personType, text }) {
   const phone = isUser ? normalizePhone(text) : null;
   const name = isUser ? (extractName(text) || extractNameLoose(text)) : null;
 
-  const fromAddress = isRelevant ? (extractAddressLine(text, "출발지") || extractFromToLoose(text).from) : null;
-  const toAddress = isRelevant ? (extractAddressLine(text, "도착지") || extractFromToLoose(text).to) : null;
+  // 주소는 먼저 출발지/도착지를 동시에 추출하는 루프 메서드로 파싱한 뒤, fallback으로 개별 라벨을 사용한다.
+  const fromTo = isRelevant ? extractFromToLoose(text) : { from: null, to: null };
+  const fromAddress = isRelevant ? (fromTo.from || extractAddressLine(text, "출발지")) : null;
+  const toAddress = isRelevant ? (fromTo.to || extractAddressLine(text, "도착지")) : null;
 
   const moveDate = isRelevant ? extractMoveDate(text) : null;
   const timeHHMM = isRelevant ? extractTimeLabel(text) : null;
