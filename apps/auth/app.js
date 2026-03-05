@@ -1,4 +1,4 @@
-// /apps/auth/app.js
+// apps/auth/app.js
 const $ = (id) => document.getElementById(id);
 
 function setMsg(text, ok = null) {
@@ -14,7 +14,6 @@ async function boot() {
 
     const ctx = await window.DDLOGI_AUTH.requireRole(null);
     if (ctx.ok) {
-      // role 자동 분기
       if (ctx.role === "admin") location.replace("/apps/admin/");
       else if (ctx.role === "driver") location.replace("/apps/driver/");
       else setMsg(`알 수 없는 role=${ctx.role}`, false);

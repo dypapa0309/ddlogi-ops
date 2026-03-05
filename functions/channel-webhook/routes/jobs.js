@@ -1,4 +1,4 @@
-// functions/channel-webhook/routes/jobs.js (ESM)
+// functions/channel-webhook/routes/jobs.js
 import { Router } from "express";
 import { requireRoleJwtFactory } from "../middlewares/adminAuth.js";
 
@@ -8,7 +8,7 @@ export default function jobsRouter({ supabase }) {
   const requireAdmin = requireRoleJwtFactory({ supabase, allowRoles: ["admin"] });
   const requireAdminOrDriver = requireRoleJwtFactory({ supabase, allowRoles: ["admin", "driver"] });
 
-  // 목록(운영자)
+  // Admin: list jobs
   router.get("/", requireAdmin, async (req, res) => {
     try {
       const limit = Math.min(parseInt(req.query.limit || "50", 10), 200);
@@ -31,7 +31,7 @@ export default function jobsRouter({ supabase }) {
     }
   });
 
-  // 단건(운영자 or 배정 기사)
+  // Admin/Driver: job detail (drivers only if assigned)
   router.get("/:chatId", requireAdminOrDriver, async (req, res) => {
     try {
       const chatId = String(req.params.chatId || "").trim();
@@ -56,7 +56,7 @@ export default function jobsRouter({ supabase }) {
     }
   });
 
-  // ops_status 업데이트(운영자 or 배정 기사)
+  // Admin/Driver (assigned): update ops_status
   router.patch("/:chatId/ops_status", requireAdminOrDriver, async (req, res) => {
     try {
       const chatId = String(req.params.chatId || "").trim();
@@ -85,14 +85,13 @@ export default function jobsRouter({ supabase }) {
         .maybeSingle();
 
       if (error) return res.status(500).json({ error: error.message });
-
       return res.json({ data });
     } catch (e) {
       return res.status(500).json({ error: e?.message || String(e) });
     }
   });
 
-  // 기사 배정(운영자)
+  // Admin: assign driver
   router.patch("/:chatId/assign_driver", requireAdmin, async (req, res) => {
     try {
       const chatId = String(req.params.chatId || "").trim();
@@ -111,10 +110,7 @@ export default function jobsRouter({ supabase }) {
       if (error) return res.status(500).json({ error: error.message });
       if (!data) return res.status(404).json({ error: "NOT_FOUND" });
 
-      await supabase
-        .from("job_events")
-        .update({ assigned_driver_id: driver_user_id })
-        .eq("chat_id", chatId);
+      await supabase.from("job_events").update({ assigned_driver_id: driver_user_id }).eq("chat_id", chatId);
 
       return res.json({ data });
     } catch (e) {

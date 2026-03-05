@@ -1,4 +1,4 @@
-// /shared/supabase-client.js
+// shared/supabase-client.js
 (() => {
   const CFG = window.DDLOGI_CONFIG || {};
   const url = CFG.supabaseUrl;
@@ -18,8 +18,8 @@
     auth: {
       persistSession: true,
       autoRefreshToken: true,
-      detectSessionInUrl: true,
-    },
+      detectSessionInUrl: true
+    }
   });
 
   console.log("✅ DDLOGI_SUPABASE ready");

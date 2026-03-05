@@ -1,4 +1,4 @@
-// functions/channel-webhook/routes/drivers.js (ESM)
+// functions/channel-webhook/routes/drivers.js
 import { Router } from "express";
 import { requireRoleJwtFactory } from "../middlewares/adminAuth.js";
 
@@ -10,9 +10,9 @@ export default function driversRouter({ supabase }) {
     try {
       const { data, error } = await supabase
         .from("profiles")
-        .select("user_id, role, name, phone, driver_id, created_at")
+        .select("user_id, role, name, phone, created_at")
         .eq("role", "driver")
-        .order("name", { ascending: true, nullsFirst: false });
+        .order("name", { ascending: true });
 
       if (error) return res.status(500).json({ error: error.message });
       return res.json({ data: data || [] });

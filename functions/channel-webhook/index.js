@@ -1,4 +1,4 @@
-// functions/channel-webhook/index.js (ESM / Node 20+)
+// functions/channel-webhook/index.js
 import express from "express";
 import "dotenv/config";
 import { createClient } from "@supabase/supabase-js";
@@ -56,7 +56,6 @@ app.use((req, res, next) => {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
     res.setHeader("Access-Control-Allow-Credentials", "true");
-    // ✅ Authorization 헤더 포함이 핵심 citeturn0search7turn0search11
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-DDLOGI-TOKEN");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
     res.setHeader("Access-Control-Max-Age", "600");
@@ -66,6 +65,7 @@ app.use((req, res, next) => {
     if (allowed) return res.status(204).end();
     return res.status(403).json({ error: "CORS forbidden" });
   }
+
   next();
 });
 
@@ -75,27 +75,37 @@ app.use((req, res, next) => {
 function sha256(text) {
   return crypto.createHash("sha256").update(String(text || ""), "utf8").digest("hex");
 }
+
 function clampText(s, max = 1200) {
   const str = String(s || "");
   return str.length > max ? str.slice(0, max) + "…" : str;
 }
+
+// PII masking (conservative)
 function maskPII(text) {
   let t = String(text || "");
+
+  // phone
   t = t.replace(/01[016789][\s-]?\d{3,4}[\s-]?\d{4}/g, (m) => {
     const digits = m.replace(/[\s-]/g, "");
     if (digits.length === 11) return digits.slice(0, 3) + "****" + digits.slice(7);
     if (digits.length === 10) return digits.slice(0, 3) + "***" + digits.slice(6);
     return "01*********";
   });
+
+  // email
   t = t.replace(/\b([A-Z0-9._%+-]{1,64})@([A-Z0-9.-]{1,255}\.[A-Z]{2,24})\b/gi, (m) => {
     const [u, d] = m.split("@");
     const uu = u.length <= 2 ? "*".repeat(u.length) : u.slice(0, 2) + "***";
     return `${uu}@${d}`;
   });
+
+  // address (rough)
   t = t.replace(
     /\b(서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|전북|전남|경북|경남|제주)\s+([^\n]{0,30}?(구|군|시))\s+([^\n]{0,30}?(동|읍|면))([^\n]*)/g,
     (m, p1, p2, _g, p4) => `${p1} ${p2} ${p4} …`
   );
+
   return t;
 }
 
@@ -111,9 +121,11 @@ function pickText(payload) {
     "";
   return typeof s === "string" ? s.trim() : "";
 }
+
 function extractMessageId(payload) {
   return payload?.entity?.id || payload?.message?.id || payload?.id || null;
 }
+
 function extractChatId(payload) {
   return (
     payload?.entity?.chatId ||
@@ -126,6 +138,7 @@ function extractChatId(payload) {
     null
   );
 }
+
 function debugChatIdSource(payload) {
   const candidates = [
     ["entity.chatId", payload?.entity?.chatId],
@@ -139,17 +152,20 @@ function debugChatIdSource(payload) {
   const hit = candidates.find(([, v]) => !!v);
   return hit ? hit[0] : "NONE";
 }
+
 function extractUserId(payload) {
   return payload?.refers?.user?.id || payload?.entity?.personId || null;
 }
+
 function extractPersonType(payload) {
   return payload?.entity?.personType || null; // bot/manager/user
 }
 
 /* =========================
-   Status logic helpers
+   Status helpers
 ========================= */
 const QUOTE_MARKER = "DDLOGI_QUOTE_V1";
+
 function isQuoteBlock(text) {
   const t = String(text || "");
   if (t.includes(QUOTE_MARKER)) return true;
@@ -161,6 +177,7 @@ function isQuoteBlock(text) {
     t.includes("출발지") &&
     t.includes("도착지") &&
     (t.includes("[예상금액]") || t.includes("예상금액"));
+
   if (legacy) return true;
 
   const naturalQuote =
@@ -168,29 +185,38 @@ function isQuoteBlock(text) {
     (t.includes("예약금") || t.includes("20%")) &&
     (t.includes("잔금") || t.includes("80%")) &&
     (t.includes("그대로 진행") || t.includes("수정/추가") || t.includes("진행을 원하시면"));
+
   return naturalQuote;
 }
+
 function containsAny(text, keywords) {
   const t = String(text || "");
   return keywords.some((k) => t.includes(k));
 }
+
 function priority(status) {
   const map = { draft: 0, quoted: 1, pending_confirm: 2, confirmed: 3, canceled: 2 };
   return map[status] ?? 0;
 }
+
 function normalizePhone(text) {
   const m = String(text || "").match(/01[016789][\s-]?\d{3,4}[\s-]?\d{4}/);
   return m ? m[0].replace(/[\s-]/g, "") : null;
 }
+
 function extractName(text) {
   const m = String(text || "").match(/이름[:\s]*([가-힣]{2,4})/);
   return m ? m[1] : null;
 }
+
 function extractNameLoose(text) {
   const t = String(text || "").trim();
-  const m = t.match(/^([가-힣]{2,4})\s*(?:님|입니다|이에요|요|입금|입금완료|입금 완료|송금|이체|완료|완료했|완료했습니다)\b/);
+  const m = t.match(
+    /^([가-힣]{2,4})\s*(?:님|입니다|이에요|요|입금|입금완료|입금 완료|송금|이체|완료|완료했|완료했습니다)\b/
+  );
   return m ? m[1] : null;
 }
+
 function extractAddressLine(text, label) {
   const safe = String(label).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const re = new RegExp(`${safe}[:\\s]*([^\\n]+)`, "m");
@@ -199,12 +225,14 @@ function extractAddressLine(text, label) {
   const addr = String(match[1] || "").trim();
   return addr.length >= 3 ? addr : null;
 }
+
 function extractFromToLoose(text) {
   const t = String(text || "");
   const from = t.match(/출발지\s*([^\n]+?)(?=\s*도착지|$)/);
   const to = t.match(/도착지\s*([^\n]+?)(?=\s*(연락처|전화|번호|$))/);
   return { from: from ? from[1].trim() : null, to: to ? to[1].trim() : null };
 }
+
 function extractMoney(text, label) {
   const safe = String(label).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const re = new RegExp(`\\[${safe}\\]\\s*₩?([0-9,]+)`, "i");
@@ -213,6 +241,7 @@ function extractMoney(text, label) {
   const n = parseInt(String(m[1]).replace(/,/g, ""), 10);
   return Number.isFinite(n) ? n : null;
 }
+
 function extractMoneyLoose(text, kind) {
   const t = String(text || "");
   const patterns = {
@@ -221,15 +250,10 @@ function extractMoneyLoose(text, kind) {
       /예상\s*금액[^\d]*([0-9]{1,3}(?:,[0-9]{3})+)\s*원/i,
       /총\s*금액[^\d]*([0-9]{1,3}(?:,[0-9]{3})+)\s*원/i,
     ],
-    deposit: [
-      /예약금[^\d]*([0-9]{1,3}(?:,[0-9]{3})+)\s*원/i,
-      /예약금\s*20%[^\d]*([0-9]{1,3}(?:,[0-9]{3})+)\s*원/i,
-    ],
-    balance: [
-      /잔금[^\d]*([0-9]{1,3}(?:,[0-9]{3})+)\s*원/i,
-      /잔금\s*80%[^\d]*([0-9]{1,3}(?:,[0-9]{3})+)\s*원/i,
-    ],
+    deposit: [/예약금[^\d]*([0-9]{1,3}(?:,[0-9]{3})+)\s*원/i, /예약금\s*20%[^\d]*([0-9]{1,3}(?:,[0-9]{3})+)\s*원/i],
+    balance: [/잔금[^\d]*([0-9]{1,3}(?:,[0-9]{3})+)\s*원/i, /잔금\s*80%[^\d]*([0-9]{1,3}(?:,[0-9]{3})+)\s*원/i],
   };
+
   const list = patterns[kind] || [];
   for (const re of list) {
     const m = t.match(re);
@@ -240,6 +264,7 @@ function extractMoneyLoose(text, kind) {
   }
   return null;
 }
+
 function extractMoveDate(text) {
   const t = String(text || "");
   const m = t.match(/\b(20\d{2})[-.\/](\d{1,2})[-.\/](\d{1,2})\b/);
@@ -249,6 +274,7 @@ function extractMoveDate(text) {
   const dd = String(parseInt(m[3], 10)).padStart(2, "0");
   return `${y}-${mm}-${dd}`;
 }
+
 function extractTimeLabel(text) {
   const t = String(text || "");
   const m1 = t.match(/\b([01]?\d|2[0-3]):([0-5]\d)\b/);
@@ -263,10 +289,12 @@ function extractTimeLabel(text) {
     if (ap === "오전" && h === 12) h = 0;
     return `${String(h).padStart(2, "0")}:${String(mi).padStart(2, "0")}`;
   }
+
   if (t.includes("오전")) return "09:00";
   if (t.includes("오후")) return "13:00";
   return null;
 }
+
 function buildKstTimestamp(dateStr, timeHHMM) {
   if (!dateStr) return null;
   const time = timeHHMM || "09:00";
@@ -279,7 +307,7 @@ function buildKstTimestamp(dateStr, timeHHMM) {
 async function saveWebhookLogSafe({ messageId, inferredStatus, chatId, personType, userId, plainText }) {
   if (!supabase) return;
 
-  const raw = plainText || "";
+  const raw = String(plainText || "");
   const masked = maskPII(raw);
 
   const row = {
@@ -289,21 +317,26 @@ async function saveWebhookLogSafe({ messageId, inferredStatus, chatId, personTyp
     message_id: messageId || null,
     chat_id_hash: chatId ? sha256(chatId) : null,
     message_id_hash: messageId ? sha256(messageId) : null,
+
+    // IMPORTANT: these are the columns you were querying; must be populated
+    person_type: personType || null,
+    text: clampText(masked, 2000),
+
     preview: clampText(masked, personType === "bot" ? 2000 : 1200),
     inferred_status: inferredStatus || "draft",
+
     meta: {
-      person_type: personType || null,
       user_id: userId || null,
-      text_len: String(raw).length,
-      v: "SAFELOG_V3",
+      text_len: raw.length,
+      v: "SAFELOG_V4",
     },
   };
 
   const { error } = await supabase.from("webhook_logs").insert(row);
   if (error) {
     const msg = String(error.message || "").toLowerCase();
-    if (msg.includes("duplicate") || msg.includes("unique")) return;
-    console.warn("⚠️ webhook_logs 저장 실패:", error.message);
+    if (msg.includes("duplicate") || msg.includes("unique")) return; // dedupe
+    console.warn("⚠️ webhook_logs insert failed:", error.message);
   }
 }
 
@@ -319,6 +352,7 @@ async function upsertJobAndEvent({ chatId, messageId, personType, text }) {
 
   const isUser = personType === "user";
   const isBot = personType === "bot";
+  const isRelevant = isUser || isBot; // prevent manager/internal notes from mutating customer/job facts
 
   const hasCancel = isUser && containsAny(text, cancelKeywords);
   const hasProceed = isUser && containsAny(text, proceedKeywords);
@@ -326,29 +360,23 @@ async function upsertJobAndEvent({ chatId, messageId, personType, text }) {
   const hasDepositStrong = isUser && containsAny(text, depositStrong) && !containsAny(text, depositNeg);
   const hasDepositWeak = isUser && containsAny(text, depositWeak) && !containsAny(text, depositNeg);
 
-  const quoteDetected = (isBot || isUser) && isQuoteBlock(text);
+  const quoteDetected = isRelevant && isQuoteBlock(text);
 
-  // 추출(이번 메시지에서만)
+  // Extract only from relevant messages
   const phone = isUser ? normalizePhone(text) : null;
   const name = isUser ? (extractName(text) || extractNameLoose(text)) : null;
 
-  const fromAddress = extractAddressLine(text, "출발지") || extractFromToLoose(text).from;
-  const toAddress = extractAddressLine(text, "도착지") || extractFromToLoose(text).to;
+  const fromAddress = isRelevant ? (extractAddressLine(text, "출발지") || extractFromToLoose(text).from) : null;
+  const toAddress = isRelevant ? (extractAddressLine(text, "도착지") || extractFromToLoose(text).to) : null;
 
-  const moveDate = quoteDetected ? extractMoveDate(text) : (isUser ? extractMoveDate(text) : null);
-  const timeHHMM = quoteDetected ? extractTimeLabel(text) : (isUser ? extractTimeLabel(text) : null);
+  const moveDate = isRelevant ? extractMoveDate(text) : null;
+  const timeHHMM = isRelevant ? extractTimeLabel(text) : null;
 
   const quoteAmount = quoteDetected ? (extractMoney(text, "예상금액") ?? extractMoneyLoose(text, "quote")) : null;
   const depositAmount = quoteDetected ? (extractMoney(text, "예약금(20%)") ?? extractMoney(text, "예약금") ?? extractMoneyLoose(text, "deposit")) : null;
   const balanceAmount = quoteDetected ? (extractMoney(text, "잔금(80%)") ?? extractMoney(text, "잔금") ?? extractMoneyLoose(text, "balance")) : null;
 
-  // 기존 job merge
-  const { data: existing, error: exErr } = await supabase
-    .from("jobs")
-    .select("*")
-    .eq("chat_id", chatId)
-    .maybeSingle();
-
+  const { data: existing, error: exErr } = await supabase.from("jobs").select("*").eq("chat_id", chatId).maybeSingle();
   if (exErr) throw exErr;
 
   const merged = {
@@ -359,9 +387,14 @@ async function upsertJobAndEvent({ chatId, messageId, personType, text }) {
 
     move_date: moveDate ?? existing?.move_date ?? null,
     time_slot_label: timeHHMM ?? existing?.time_slot_label ?? null,
-    scheduled_at: (moveDate || existing?.move_date)
-      ? buildKstTimestamp(moveDate ?? String(existing?.move_date || "").slice(0, 10), timeHHMM ?? existing?.time_slot_label ?? "09:00")
-      : (existing?.scheduled_at ?? null),
+
+    scheduled_at:
+      (moveDate || existing?.move_date)
+        ? buildKstTimestamp(
+            (moveDate ?? String(existing?.move_date || "").slice(0, 10)) || null,
+            timeHHMM ?? existing?.time_slot_label ?? "09:00"
+          )
+        : existing?.scheduled_at ?? null,
 
     quote_amount: quoteAmount ?? existing?.quote_amount ?? null,
     deposit_amount: depositAmount ?? existing?.deposit_amount ?? null,
@@ -398,19 +431,24 @@ async function upsertJobAndEvent({ chatId, messageId, personType, text }) {
     }
   }
 
-  // confirmed에서 다운그레이드 방지(취소 제외)
   if (nextStatus !== "canceled" && priority(existingStatus) > priority(nextStatus)) {
     nextStatus = existingStatus;
     reason = "status_downgrade_blocked";
   }
 
+  const nowIso = new Date().toISOString();
+
   const jobRow = {
     source: "channeltalk",
     chat_id: chatId,
+    chat_id_hash: sha256(chatId),
     source_message_id: messageId || existing?.source_message_id || null,
 
     status: nextStatus,
     status_reason: reason,
+
+    ops_status: existing?.ops_status || "unassigned",
+    last_message_at: nowIso,
 
     customer_name: merged.customer_name,
     customer_phone: merged.customer_phone,
@@ -426,8 +464,9 @@ async function upsertJobAndEvent({ chatId, messageId, personType, text }) {
     balance_amount: merged.balance_amount,
   };
 
-  if (!existing?.confirmed_at && nextStatus === "confirmed") jobRow.confirmed_at = new Date().toISOString();
+  if (!existing?.confirmed_at && nextStatus === "confirmed") jobRow.confirmed_at = nowIso;
   if (existing?.confirmed_at) jobRow.confirmed_at = existing.confirmed_at;
+  if (nextStatus === "canceled") jobRow.canceled_at = nowIso;
 
   const { data: job, error: upErr } = await supabase
     .from("jobs")
@@ -437,20 +476,20 @@ async function upsertJobAndEvent({ chatId, messageId, personType, text }) {
 
   if (upErr) throw upErr;
 
-  // ✅ 캘린더(job_events) 반영
-  if (job?.id) {
+  // Calendar sync
+  if (job?.chat_id) {
     if (job.status === "confirmed") {
-      const startStr = job.scheduled_at || buildKstTimestamp(String(job.move_date).slice(0, 10), job.time_slot_label || "09:00");
-      const start = new Date(startStr);
-      const end = new Date(start.getTime() + 2 * 60 * 60 * 1000);
+      const dateStr = job.scheduled_at || buildKstTimestamp(String(job.move_date || "").slice(0, 10), job.time_slot_label || "09:00");
+      if (dateStr) {
+        const start = new Date(dateStr);
+        const end = new Date(start.getTime() + 2 * 60 * 60 * 1000);
 
-      const title = `${job.customer_name || "고객"} | ${String(job.from_address || "-").slice(0, 18)} → ${String(job.to_address || "-").slice(0, 18)}`;
+        const title = `${job.customer_name || "고객"} | ${String(job.from_address || "-").slice(0, 18)} → ${String(
+          job.to_address || "-"
+        ).slice(0, 18)}`;
 
-      await supabase
-        .from("job_events")
-        .upsert(
+        await supabase.from("job_events").upsert(
           {
-            job_id: job.id,
             chat_id: job.chat_id,
             start_at: start.toISOString(),
             end_at: end.toISOString(),
@@ -458,15 +497,13 @@ async function upsertJobAndEvent({ chatId, messageId, personType, text }) {
             title,
             assigned_driver_id: job.assigned_driver_id || null,
           },
-          { onConflict: "job_id" }
+          { onConflict: "chat_id" }
         );
+      }
     }
 
     if (job.status === "canceled") {
-      await supabase
-        .from("job_events")
-        .update({ status: "canceled" })
-        .eq("chat_id", job.chat_id);
+      await supabase.from("job_events").update({ status: "canceled" }).eq("chat_id", job.chat_id);
     }
   }
 
@@ -495,13 +532,12 @@ app.post("/webhook/channel", async (req, res) => {
   }
 
   const payload = req.body || {};
-  const text = pickText(payload);
   const messageId = extractMessageId(payload);
   const chatId = extractChatId(payload);
   const chatIdSource = debugChatIdSource(payload);
   const userId = extractUserId(payload);
   const personType = extractPersonType(payload);
-  const plainText = payload?.entity?.plainText || text;
+  const plainText = payload?.entity?.plainText || pickText(payload);
 
   console.log("\n========================");
   console.log("📩 webhook received");
@@ -512,18 +548,22 @@ app.post("/webhook/channel", async (req, res) => {
   console.log("textLen:", String(plainText || "").length);
 
   try {
+    // First: upsert job/event (best-effort)
+    let job = null;
+    if (chatId) {
+      job = await upsertJobAndEvent({ chatId, messageId, personType, text: plainText });
+    }
+
+    // Always: log the message (masked) with inferred_status = job.status if available
     await saveWebhookLogSafe({
       messageId,
-      inferredStatus: "draft",
+      inferredStatus: job?.status || "draft",
       chatId,
       personType,
       userId,
       plainText,
     });
 
-    if (!chatId) return res.json({ ok: true, status: "logged_only", reason: "no_chatId", chatIdSource });
-
-    const job = await upsertJobAndEvent({ chatId, messageId, personType, text: plainText });
     return res.json({ ok: true, job: job || null, chatIdSource });
   } catch (e) {
     console.error("❌ webhook error:", e?.message || e);
@@ -538,5 +578,10 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`🚀 Server Running on port ${PORT}`);
   if (ADMIN_ALLOWED_ORIGINS.length > 0) console.log("✅ ADMIN_ALLOWED_ORIGINS:", ADMIN_ALLOWED_ORIGINS.join(", "));
-  else console.log(IS_PROD ? "⛔ ADMIN_ALLOWED_ORIGINS missing in prod (CORS blocks)." : "⚠️ ADMIN_ALLOWED_ORIGINS not set (dev allows all origins).");
+  else
+    console.log(
+      IS_PROD
+        ? "⛔ ADMIN_ALLOWED_ORIGINS missing in prod (CORS blocks)."
+        : "⚠️ ADMIN_ALLOWED_ORIGINS not set (dev allows all origins)."
+    );
 });

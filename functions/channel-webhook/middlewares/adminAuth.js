@@ -1,5 +1,7 @@
-// functions/channel-webhook/middlewares/adminAuth.js (ESM)
-// ✅ 이름은 adminAuth.js 그대로 두되, 내부는 "JWT + role"로 통일
+// functions/channel-webhook/middlewares/adminAuth.js
+// JWT auth middleware: validates access token with Supabase Auth server,
+// then checks profiles.role for authorization.
+
 export function requireRoleJwtFactory({ supabase, allowRoles = [] }) {
   return async function requireRoleJwt(req, res, next) {
     try {
@@ -9,17 +11,16 @@ export function requireRoleJwtFactory({ supabase, allowRoles = [] }) {
       const token = h.startsWith("Bearer ") ? h.slice(7).trim() : "";
       if (!token) return res.status(401).json({ error: "NO_AUTH_TOKEN" });
 
-      // ✅ Supabase 공식 권장: 서버에서 토큰 검증은 getUser(jwt) 사용 citeturn0search10
       const { data: userData, error: userErr } = await supabase.auth.getUser(token);
       if (userErr || !userData?.user?.id) {
-        return res.status(401).json({ error: "INVALID_SESSION", detail: userErr?.message });
+        return res.status(401).json({ error: "INVALID_SESSION", detail: userErr?.message || null });
       }
 
       const userId = userData.user.id;
 
       const { data: prof, error: profErr } = await supabase
         .from("profiles")
-        .select("role, display_name")
+        .select("role, name")
         .eq("user_id", userId)
         .maybeSingle();
 
@@ -34,7 +35,7 @@ export function requireRoleJwtFactory({ supabase, allowRoles = [] }) {
       req.user = userData.user;
       req.user_id = userId;
       req.role = role;
-      req.display_name = prof?.display_name || null;
+      req.name = prof?.name || null;
 
       next();
     } catch (e) {

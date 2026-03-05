@@ -1,4 +1,4 @@
-// /apps/driver/app.js
+// apps/driver/app.js
 const $ = (id) => document.getElementById(id);
 
 function setConn(ok, text) {
@@ -29,12 +29,15 @@ function getApiBase() { return normalizeBase(window.DDLOGI_CONFIG?.apiBaseDefaul
 
 async function apiGet(path){
   const base = getApiBase();
+  if (!base) throw new Error("API base missing (config.js apiBaseDefault)");
   const token = await window.DDLOGI_AUTH.getAccessToken();
   if (!token) throw new Error("세션 없음(로그인 필요)");
+
   const res = await fetch(base + path, {
     method: "GET",
     headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" }
   });
+
   if (res.status === 401) throw new Error("401 (세션 만료/토큰 오류)");
   if (res.status === 403) throw new Error("403 (권한 또는 CORS)");
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
@@ -43,13 +46,16 @@ async function apiGet(path){
 
 async function apiPatch(path, body){
   const base = getApiBase();
+  if (!base) throw new Error("API base missing (config.js apiBaseDefault)");
   const token = await window.DDLOGI_AUTH.getAccessToken();
   if (!token) throw new Error("세션 없음(로그인 필요)");
+
   const res = await fetch(base + path, {
     method: "PATCH",
     headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
     body: JSON.stringify(body || {})
   });
+
   if (res.status === 401) throw new Error("401 (세션 만료/토큰 오류)");
   if (res.status === 403) throw new Error("403 (권한 또는 CORS)");
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);

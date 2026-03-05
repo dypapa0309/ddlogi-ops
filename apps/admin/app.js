@@ -1,4 +1,4 @@
-// /apps/admin/app.js
+// apps/admin/app.js
 const $ = (id) => document.getElementById(id);
 
 function setConn(ok, text) {
@@ -29,12 +29,15 @@ function getApiBase() { return normalizeBase(window.DDLOGI_CONFIG?.apiBaseDefaul
 
 async function apiGet(path){
   const base = getApiBase();
+  if (!base) throw new Error("API base missing (config.js apiBaseDefault)");
   const token = await window.DDLOGI_AUTH.getAccessToken();
   if (!token) throw new Error("세션 없음(로그인 필요)");
+
   const res = await fetch(base + path, {
     method: "GET",
     headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" }
   });
+
   if (res.status === 401) throw new Error("401 (세션 만료/토큰 오류)");
   if (res.status === 403) throw new Error("403 (권한 또는 CORS)");
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
@@ -43,13 +46,16 @@ async function apiGet(path){
 
 async function apiPatch(path, body){
   const base = getApiBase();
+  if (!base) throw new Error("API base missing (config.js apiBaseDefault)");
   const token = await window.DDLOGI_AUTH.getAccessToken();
   if (!token) throw new Error("세션 없음(로그인 필요)");
+
   const res = await fetch(base + path, {
     method: "PATCH",
     headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
     body: JSON.stringify(body || {})
   });
+
   if (res.status === 401) throw new Error("401 (세션 만료/토큰 오류)");
   if (res.status === 403) throw new Error("403 (권한 또는 CORS)");
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
@@ -160,7 +166,6 @@ async function refresh(){
 
     const qs = new URLSearchParams();
     qs.set("from", from);
-    await 0;
     qs.set("to", to);
     if (status) qs.set("status", status);
 
@@ -183,8 +188,9 @@ async function loadDrivers(){
     DRIVERS = Array.isArray(json?.data) ? json.data : [];
 
     const sel = $("driverSelect");
-    sel.innerHTML = `<option value="">기사 선택</option>` +
-      DRIVERS.map(d => `<option value="${d.user_id}">${d.display_name || d.user_id}</option>`).join("");
+    sel.innerHTML =
+      `<option value="">기사 선택</option>` +
+      DRIVERS.map(d => `<option value="${d.user_id}">${(d.name || d.user_id)}</option>`).join("");
 
     setStatus(`기사 ${DRIVERS.length}명 로드됨`, true);
   } catch (e) {
