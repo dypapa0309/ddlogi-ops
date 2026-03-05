@@ -189,6 +189,7 @@ export default function jobsRouter({ supabase }) {
       await supabase.from("job_events").insert({
         job_id: job.id,
         event_type: "driver_picked",
+        // actor 컬럼이 job_events 테이블에 없으므로 payload 안에 actor 정보를 포함한다.
         payload: { actor: req.user_id }
       });
       return res.json({ data: { picked: true } });

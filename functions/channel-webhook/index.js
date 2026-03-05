@@ -406,28 +406,28 @@ async function upsertJobAndEvent({ chatId, messageId, personType, text }) {
   let reason = existing?.status_reason || null;
 
   if (hasCancel) {
+    // 취소 의도
     nextStatus = "canceled";
     reason = existingStatus === "confirmed" ? "canceled_after_confirmed" : "cancel_intent";
   } else if (priority(existingStatus) < priority("quoted") && quoteDetected) {
+    // 봇 견적서 인식
     nextStatus = "quoted";
     reason = "quote_detected";
   } else if (priority(existingStatus) < priority("pending_confirm") && (hasProceed || hasDepositWeak)) {
+    // 진행 의사/약한 입금 표현
     nextStatus = "pending_confirm";
     reason = hasProceed ? "proceed_intent" : "deposit_weak_intent";
   } else if (priority(existingStatus) < priority("confirmed") && hasDepositStrong) {
-    const hasAll =
-      !!merged.customer_name &&
-      !!merged.customer_phone &&
-      !!merged.from_address &&
-      !!merged.to_address &&
-      !!merged.move_date;
-
+    // 강한 입금 표현이 있고, 필수 정보가 모두 채워졌는지 여부에 따라 confirmed 또는 pending_confirm 유지
+    const requiredFields = ["customer_name", "customer_phone", "from_address", "to_address", "move_date"];
+    const missingFields = requiredFields.filter((key) => !merged[key]);
+    const hasAll = missingFields.length === 0;
     if (hasAll) {
       nextStatus = "confirmed";
       reason = "deposit_strong+required_fields";
     } else {
       nextStatus = "pending_confirm";
-      reason = "deposit_strong_but_missing_fields";
+      reason = `deposit_strong_but_missing_fields:${missingFields.join(",")}`;
     }
   }
 
@@ -464,8 +464,14 @@ async function upsertJobAndEvent({ chatId, messageId, personType, text }) {
     balance_amount: merged.balance_amount,
   };
 
-  if (!existing?.confirmed_at && nextStatus === "confirmed") jobRow.confirmed_at = nowIso;
+  // 최초로 confirmed 상태가 될 때 confirmed_at을 기록하고 ops_status를 open으로 변경한다.
+  if (!existing?.confirmed_at && nextStatus === "confirmed") {
+    jobRow.confirmed_at = nowIso;
+    jobRow.ops_status = "open";
+  }
+  // 이미 confirmed_at이 있으면 그대로 유지
   if (existing?.confirmed_at) jobRow.confirmed_at = existing.confirmed_at;
+  // 취소되면 canceled_at을 기록한다.
   if (nextStatus === "canceled") jobRow.canceled_at = nowIso;
 
   const { data: job, error: upErr } = await supabase
