@@ -8,6 +8,9 @@ export default function jobsRouter({ supabase }) {
   const requireAdmin = requireRoleJwtFactory({ supabase, allowRoles: ["admin"] });
   const requireAdminOrDriver = requireRoleJwtFactory({ supabase, allowRoles: ["admin", "driver"] });
 
+  // Drivers only (self-pick). Declared separately for clarity.
+  const requireDriver = requireRoleJwtFactory({ supabase, allowRoles: ["driver"] });
+
   // Admin: list jobs
   router.get("/", requireAdmin, async (req, res) => {
     try {
@@ -113,6 +116,57 @@ export default function jobsRouter({ supabase }) {
       await supabase.from("job_events").update({ assigned_driver_id: driver_user_id }).eq("chat_id", chatId);
 
       return res.json({ data });
+    } catch (e) {
+      return res.status(500).json({ error: e?.message || String(e) });
+    }
+  });
+
+  // List open jobs for pickup (drivers and admins)
+  router.get("/open", requireAdminOrDriver, async (req, res) => {
+    try {
+      const { data, error } = await supabase
+        .from("jobs")
+        .select("*")
+        .eq("status", "confirmed")
+        .eq("ops_status", "open");
+      if (error) {
+        return res.status(500).json({ error: error.message });
+      }
+      return res.json({ data: data || [] });
+    } catch (e) {
+      return res.status(500).json({ error: e?.message || String(e) });
+    }
+  });
+
+  // Driver self-pick
+  router.post("/:chatId/pick", requireDriver, async (req, res) => {
+    try {
+      const chatId = String(req.params.chatId || "").trim();
+      if (!chatId) return res.status(400).json({ error: "CHAT_ID_REQUIRED" });
+      const { data: job, error: jobErr } = await supabase
+        .from("jobs")
+        .select("id, status, ops_status")
+        .eq("chat_id", chatId)
+        .maybeSingle();
+      if (jobErr) return res.status(500).json({ error: jobErr.message });
+      if (!job) return res.status(404).json({ error: "NOT_FOUND" });
+      if (job.status !== "confirmed" || job.ops_status !== "open") {
+        return res.status(400).json({ error: "NOT_OPEN" });
+      }
+      const insertRes = await supabase.from("driver_assignments").insert({
+        job_id: job.id,
+        driver_id: req.user_id,
+        status: "picked",
+        source: "self_pick",
+      });
+      if (insertRes.error) {
+        const msg = String(insertRes.error.message || "").toLowerCase();
+        if (msg.includes("duplicate") || msg.includes("unique")) {
+          return res.status(400).json({ error: "ALREADY_PICKED" });
+        }
+        return res.status(500).json({ error: insertRes.error.message });
+      }
+      return res.json({ success: true });
     } catch (e) {
       return res.status(500).json({ error: e?.message || String(e) });
     }
