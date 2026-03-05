@@ -189,8 +189,7 @@ export default function jobsRouter({ supabase }) {
       await supabase.from("job_events").insert({
         job_id: job.id,
         event_type: "driver_picked",
-        actor: req.user_id,
-        payload: {}
+        payload: { actor: req.user_id }
       });
       return res.json({ data: { picked: true } });
     } catch (e) {
