@@ -7,8 +7,7 @@ export default function jobsRouter({ supabase }) {
 
   const requireAdmin = requireRoleJwtFactory({ supabase, allowRoles: ["admin"] });
   const requireAdminOrDriver = requireRoleJwtFactory({ supabase, allowRoles: ["admin", "driver"] });
-
-  // Drivers only (self-pick). Declared separately for clarity.
+  // Separate middleware for driver-only routes
   const requireDriver = requireRoleJwtFactory({ supabase, allowRoles: ["driver"] });
 
   // Admin: list jobs
@@ -121,52 +120,79 @@ export default function jobsRouter({ supabase }) {
     }
   });
 
-  // List open jobs for pickup (drivers and admins)
+  // List open jobs (status=confirmed, ops_status=open)
   router.get("/open", requireAdminOrDriver, async (req, res) => {
     try {
+      // Fetch jobs that are confirmed and currently open
       const { data, error } = await supabase
         .from("jobs")
         .select("*")
         .eq("status", "confirmed")
-        .eq("ops_status", "open");
-      if (error) {
-        return res.status(500).json({ error: error.message });
+        .eq("ops_status", "open")
+        .order("move_date", { ascending: true });
+      if (error) return res.status(500).json({ error: error.message });
+      let rows = data || [];
+      // For drivers, mask sensitive information prior to pickup
+      if (req.role === "driver") {
+        rows = rows.map((r) => ({
+          ...r,
+          phone: null,
+          customer_name: null
+        }));
       }
-      return res.json({ data: data || [] });
+      return res.json({ data: rows });
     } catch (e) {
       return res.status(500).json({ error: e?.message || String(e) });
     }
   });
 
-  // Driver self-pick
+  // Driver: pick up a job (self-assign)
   router.post("/:chatId/pick", requireDriver, async (req, res) => {
     try {
       const chatId = String(req.params.chatId || "").trim();
       if (!chatId) return res.status(400).json({ error: "CHAT_ID_REQUIRED" });
+      // Retrieve the job information
       const { data: job, error: jobErr } = await supabase
         .from("jobs")
-        .select("id, status, ops_status")
+        .select("id,status,ops_status,assigned_driver_id")
         .eq("chat_id", chatId)
         .maybeSingle();
       if (jobErr) return res.status(500).json({ error: jobErr.message });
       if (!job) return res.status(404).json({ error: "NOT_FOUND" });
+      // Job must be confirmed and open to be picked
       if (job.status !== "confirmed" || job.ops_status !== "open") {
         return res.status(400).json({ error: "NOT_OPEN" });
       }
-      const insertRes = await supabase.from("driver_assignments").insert({
+      // Attempt to create an assignment row; rely on DB unique constraint for race conditions
+      const ins = await supabase.from("driver_assignments").insert({
         job_id: job.id,
         driver_id: req.user_id,
         status: "picked",
-        source: "self_pick",
-      });
-      if (insertRes.error) {
-        const msg = String(insertRes.error.message || "").toLowerCase();
+        source: "self_pick"
+      }).select();
+      if (ins.error) {
+        const msg = String(ins.error.message || "").toLowerCase();
         if (msg.includes("duplicate") || msg.includes("unique")) {
           return res.status(400).json({ error: "ALREADY_PICKED" });
         }
-        return res.status(500).json({ error: insertRes.error.message });
+        return res.status(500).json({ error: ins.error.message });
       }
-      return res.json({ success: true });
+      // Update the job to reflect the new assignment and status
+      const upd = await supabase
+        .from("jobs")
+        .update({ assigned_driver_id: req.user_id, ops_status: "assigned" })
+        .eq("id", job.id);
+      if (upd.error) {
+        return res.status(500).json({ error: upd.error.message });
+      }
+      // Log the event
+      await supabase.from("job_events").insert({
+        job_id: job.id,
+        event_type: "driver_picked",
+        actor: req.user_id,
+        payload: {}
+      });
+      return res.json({ data: { picked: true } });
     } catch (e) {
       return res.status(500).json({ error: e?.message || String(e) });
     }

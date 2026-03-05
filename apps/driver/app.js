@@ -214,6 +214,15 @@ async function boot(){
   $("btnUpdateOps").onclick = updateOps;
 
   await refresh();
+
+  // Bind logout button if it exists
+  const btnLogoutEl = $("btnLogout");
+  if (btnLogoutEl) {
+    btnLogoutEl.onclick = async () => {
+      await window.DDLOGI_AUTH.signOut();
+      location.href = "/apps/auth/";
+    };
+  }
 }
 
 document.addEventListener("DOMContentLoaded", boot);

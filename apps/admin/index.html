@@ -21,7 +21,7 @@
         <button id="btnPrev" class="btn">◀</button>
         <button id="btnNext" class="btn">▶</button>
         <button id="btnRefresh" class="btn btn-primary">새로고침</button>
-        <a class="btn btn-link" href="/apps/auth/">로그인/계정</a>
+        <button id="btnLogout" class="btn btn-link">로그아웃</button>
       </div>
     </div>
   </header>
@@ -72,11 +72,13 @@
       <div class="muted small">운행 상태(ops_status)</div>
       <select id="opsSelect" class="input mt10">
         <option value="">(변경 안함)</option>
-        <option value="pending">pending</option>
+        <option value="open">open</option>
+        <option value="assigned">assigned</option>
         <option value="in_progress">in_progress</option>
         <option value="completed">completed</option>
-        <option value="settled">settled</option>
+        <option value="hold">hold</option>
         <option value="closed">closed</option>
+        <option value="canceled_ops">canceled_ops</option>
       </select>
       <button id="btnUpdateOps" class="btn btn-primary mt10">ops_status 업데이트</button>
     </aside>
