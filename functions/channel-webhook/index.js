@@ -367,7 +367,8 @@ async function upsertJobAndEvent({ chatId, messageId, personType, text }) {
   const isUser = !personType || personType === "user";
   const isBot = personType === "bot";
   const isManager = personType === "manager";
-  // manager 메시지는 상태를 바꾸지 않고, 유저/봇 메시지만 의미 있다.
+  // manager 메시지는 상태/데이터를 바꾸지 않는다.
+  // 고객(user) 메시지가 기본 입력이며, 예외적으로 "견적서 블록"(quote block)은 데이터 파싱에 허용한다.
   const isRelevant = !isManager;
 
   const hasCancel = isUser && containsAny(text, cancelKeywords);
@@ -377,18 +378,21 @@ async function upsertJobAndEvent({ chatId, messageId, personType, text }) {
   const hasDepositWeak = isUser && containsAny(text, depositWeak) && !containsAny(text, depositNeg);
 
   const quoteDetected = isRelevant && isQuoteBlock(text);
+  const allowDataParse = isUser || quoteDetected;
 
   // Extract only from relevant messages
-  const phone = isUser ? normalizePhone(text) : null;
-  const name = isUser ? (extractName(text) || extractNameLoose(text)) : null;
+  const phone = allowDataParse ? normalizePhone(text) : null;
+  const name = allowDataParse ? (extractName(text) || extractNameLoose(text)) : null;
 
   // 주소는 먼저 출발지/도착지를 동시에 추출하는 루프 메서드로 파싱한 뒤, fallback으로 개별 라벨을 사용한다.
-  const fromTo = isRelevant ? extractFromToLoose(text) : { from: null, to: null };
-  const fromAddress = isRelevant ? (fromTo.from || extractAddressLine(text, "출발지")) : null;
-  const toAddress = isRelevant ? (fromTo.to || extractAddressLine(text, "도착지")) : null;
+  // 주소/연락처 등 고객 필드는 "고객 메시지" 또는 "견적서 블록"에서만 갱신한다.
+  // (봇의 안내 문구에 "출발지/도착지" 같은 단어가 포함될 때 잘못 덮어쓰는 버그 방지)
+  const fromTo = allowDataParse ? extractFromToLoose(text) : { from: null, to: null };
+  const fromAddress = allowDataParse ? (fromTo.from || extractAddressLine(text, "출발지")) : null;
+  const toAddress = allowDataParse ? (fromTo.to || extractAddressLine(text, "도착지")) : null;
 
-  const moveDate = isRelevant ? extractMoveDate(text) : null;
-  const timeHHMM = isRelevant ? extractTimeLabel(text) : null;
+  const moveDate = allowDataParse ? extractMoveDate(text) : null;
+  const timeHHMM = allowDataParse ? extractTimeLabel(text) : null;
 
   const quoteAmount = quoteDetected ? (extractMoney(text, "예상금액") ?? extractMoneyLoose(text, "quote")) : null;
   const depositAmount = quoteDetected ? (extractMoney(text, "예약금(20%)") ?? extractMoney(text, "예약금") ?? extractMoneyLoose(text, "deposit")) : null;
@@ -417,6 +421,9 @@ async function upsertJobAndEvent({ chatId, messageId, personType, text }) {
     quote_amount: quoteAmount ?? existing?.quote_amount ?? null,
     deposit_amount: depositAmount ?? existing?.deposit_amount ?? null,
     balance_amount: balanceAmount ?? existing?.balance_amount ?? null,
+
+    // 원문 견적서(주문서 양식) 보관: 관리/캘린더 상세 렌더링에 사용
+    raw_text: quoteDetected ? clampText(String(text || ""), 4000) : (existing?.raw_text ?? null),
   };
 
   const existingStatus = existing?.status || "draft";
@@ -437,7 +444,8 @@ async function upsertJobAndEvent({ chatId, messageId, personType, text }) {
     reason = hasProceed ? "proceed_intent" : "deposit_weak_intent";
   } else if (priority(existingStatus) < priority("confirmed") && hasDepositStrong) {
     // 강한 입금 표현이 있고, 필수 정보가 모두 채워졌는지 여부에 따라 confirmed 또는 pending_confirm 유지
-    const requiredFields = ["customer_name", "customer_phone", "from_address", "to_address", "move_date"];
+    // customer_name은 채널톡에서 비워져도 많아서 필수에서 제외(전화/주소/날짜는 필수)
+    const requiredFields = ["customer_phone", "from_address", "to_address", "move_date"];
     const missingFields = requiredFields.filter((key) => !merged[key]);
     const hasAll = missingFields.length === 0;
     if (hasAll) {
@@ -480,13 +488,18 @@ async function upsertJobAndEvent({ chatId, messageId, personType, text }) {
     quote_amount: merged.quote_amount,
     deposit_amount: merged.deposit_amount,
     balance_amount: merged.balance_amount,
+	    raw_text: merged.raw_text,
   };
 
-  // 최초로 confirmed 상태가 될 때 confirmed_at을 기록하고 ops_status를 open으로 변경한다.
-  if (!existing?.confirmed_at && nextStatus === "confirmed") {
-    jobRow.confirmed_at = nowIso;
-    jobRow.ops_status = "open";
-  }
+	  // confirmed 상태면 기본적으로 "기사 픽업 대기" 상태(open)로 맞춘다.
+	  // (과거 데이터에 ops_status='unassigned'가 남아 open-orders가 비는 문제 방지)
+	  if (nextStatus === "confirmed" && (!jobRow.ops_status || jobRow.ops_status === "unassigned")) {
+	    jobRow.ops_status = "open";
+	  }
+	  // 최초로 confirmed 상태가 될 때 confirmed_at 기록
+	  if (!existing?.confirmed_at && nextStatus === "confirmed") {
+	    jobRow.confirmed_at = nowIso;
+	  }
   // 이미 confirmed_at이 있으면 그대로 유지
   if (existing?.confirmed_at) jobRow.confirmed_at = existing.confirmed_at;
   // 취소되면 canceled_at을 기록한다.
@@ -500,35 +513,35 @@ async function upsertJobAndEvent({ chatId, messageId, personType, text }) {
 
   if (upErr) throw upErr;
 
-  // Calendar sync
-  if (job?.chat_id) {
-    if (job.status === "confirmed") {
-      const dateStr = job.scheduled_at || buildKstTimestamp(String(job.move_date || "").slice(0, 10), job.time_slot_label || "09:00");
-      if (dateStr) {
-        const start = new Date(dateStr);
-        const end = new Date(start.getTime() + 2 * 60 * 60 * 1000);
+  // Audit log (job_events)
+  try {
+    if (job?.id) {
+      const beforeStatus = existing?.status || null;
+      if (!existing) {
+        await supabase.from("job_events").insert({
+          job_id: job.id,
+          event_type: "created",
+          payload: { status: job.status, source_message_id: messageId || null },
+        });
+      } else if (beforeStatus !== job.status) {
+        await supabase.from("job_events").insert({
+          job_id: job.id,
+          event_type: "status_changed",
+          payload: { from: beforeStatus, to: job.status, reason, source_message_id: messageId || null },
+        });
+      }
 
-        const title = `${job.customer_name || "고객"} | ${String(job.from_address || "-").slice(0, 18)} → ${String(
-          job.to_address || "-"
-        ).slice(0, 18)}`;
-
-        await supabase.from("job_events").upsert(
-          {
-            chat_id: job.chat_id,
-            start_at: start.toISOString(),
-            end_at: end.toISOString(),
-            status: "confirmed",
-            title,
-            assigned_driver_id: job.assigned_driver_id || null,
-          },
-          { onConflict: "chat_id" }
-        );
+      // deposit confirmed moment
+      if (!existing?.confirmed_at && job.status === "confirmed") {
+        await supabase.from("job_events").insert({
+          job_id: job.id,
+          event_type: "deposit_confirmed",
+          payload: { at: job.confirmed_at || null, source_message_id: messageId || null },
+        });
       }
     }
-
-    if (job.status === "canceled") {
-      await supabase.from("job_events").update({ status: "canceled" }).eq("chat_id", job.chat_id);
-    }
+  } catch (e) {
+    console.warn("⚠️ job_events insert failed:", e?.message || String(e));
   }
 
   return job;

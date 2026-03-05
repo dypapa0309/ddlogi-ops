@@ -131,7 +131,7 @@ export default function jobsRouter({ supabase }) {
     }
   });
 
-  // List open jobs (status=confirmed, ops_status=open)
+  // List open jobs (status=confirmed, ops_status=open|unassigned)
   router.get("/open", requireAdminOrDriver, async (req, res) => {
     try {
       // Fetch jobs that are confirmed and currently open
@@ -139,7 +139,8 @@ export default function jobsRouter({ supabase }) {
         .from("jobs")
         .select("*")
         .eq("status", "confirmed")
-        .eq("ops_status", "open")
+        // legacy rows may still have ops_status='unassigned' even after confirmation
+        .in("ops_status", ["open", "unassigned"])
         .order("move_date", { ascending: true });
       if (error) return res.status(500).json({ error: error.message });
       let rows = data || [];
@@ -147,7 +148,7 @@ export default function jobsRouter({ supabase }) {
       if (req.role === "driver") {
         rows = rows.map((r) => ({
           ...r,
-          phone: null,
+          customer_phone: null,
           customer_name: null
         }));
       }
@@ -170,8 +171,8 @@ export default function jobsRouter({ supabase }) {
         .maybeSingle();
       if (jobErr) return res.status(500).json({ error: jobErr.message });
       if (!job) return res.status(404).json({ error: "NOT_FOUND" });
-      // Job must be confirmed and open to be picked
-      if (job.status !== "confirmed" || job.ops_status !== "open") {
+      // Job must be confirmed and open/unassigned to be picked
+      if (job.status !== "confirmed" || !["open", "unassigned"].includes(job.ops_status)) {
         return res.status(400).json({ error: "NOT_OPEN" });
       }
       // Attempt to create an assignment row; rely on DB unique constraint for race conditions

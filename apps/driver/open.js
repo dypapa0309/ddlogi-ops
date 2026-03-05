@@ -127,7 +127,7 @@ async function boot() {
   }
   $('#btnRefresh').onclick = loadOpenJobs;
   // Logout handler
-  const btnLogoutEl = $('#btnLogout');
+  const btnLogoutEl = $('btnLogout');
   if (btnLogoutEl) {
     btnLogoutEl.onclick = async () => {
       await window.DDLOGI_AUTH.signOut();
