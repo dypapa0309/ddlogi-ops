@@ -40,13 +40,52 @@
     return Number.isFinite(num) ? num : null;
   }
 
+  function normalizeHourSlot(value) {
+    if (value == null) return null;
+    const s = String(value).trim();
+    if (!s) return null;
+
+    let m = s.match(/^(\d{1,2})$/);
+    if (m) return String(Number(m[1]));
+    m = s.match(/^(\d{1,2})시$/);
+    if (m) return String(Number(m[1]));
+    m = s.match(/^(\d{1,2}):(\d{2})$/);
+    if (m) return String(Number(m[1]));
+    m = s.match(/^(오전|오후)?\s*(\d{1,2})\s*시(?:\s*(\d{1,2})\s*분?)?$/);
+    if (m) {
+      const ap = m[1] || '';
+      let hh = Number(m[2]);
+      if (ap === '오후' && hh < 12) hh += 12;
+      if (ap === '오전' && hh === 12) hh = 0;
+      return String(hh);
+    }
+    return null;
+  }
+
+  function normalizeTimeLabel(value) {
+    const hour = normalizeHourSlot(value);
+    return hour ? `${hour}시` : null;
+  }
+
+  function timeLabelToHHMM(label) {
+    const hour = normalizeHourSlot(label);
+    return hour == null ? '09:00' : `${String(hour).padStart(2, '0')}:00`;
+  }
+
+  function buildKstTimestamp(dateStr, timeLabel) {
+    if (!dateStr) return null;
+    return `${dateStr}T${timeLabelToHHMM(timeLabel)}:00+09:00`;
+  }
+
   function parseSchedule(value) {
-    const out = { move_date: null, time_slot_label: null };
+    const out = { move_date: null, time_slot_label: null, scheduled_at: null };
     if (!value) return out;
-    const dateMatch = String(value).match(/(20\d{2}-\d{2}-\d{2})/);
+    const raw = String(value).trim();
+    const dateMatch = raw.match(/(20\d{2}-\d{2}-\d{2})/);
     if (dateMatch) out.move_date = dateMatch[1];
-    const slashParts = String(value).split('/').map((v) => v.trim()).filter(Boolean);
-    if (slashParts.length >= 2) out.time_slot_label = slashParts.slice(1).join(' / ').trim();
+    const tail = raw.replace(/.*?(20\d{2}-\d{2}-\d{2})/, '').replace(/^\s*[\/|,-]?\s*/, '').trim();
+    out.time_slot_label = normalizeTimeLabel(tail || raw);
+    out.scheduled_at = out.move_date ? buildKstTimestamp(out.move_date, out.time_slot_label) : null;
     return out;
   }
 
@@ -77,10 +116,21 @@
     const direct = findLabelValue(lines, ['가구·가전 기타사항', '기타사항']);
     if (direct) requests.push(direct);
 
+    const captureLabels = [
+      '경유지', '경유지 짐양', '경유지 가구·가전', '경유지 짐 기타사항', '경유지 계단',
+      '경유지 사다리차', '경유지 버려주세요', '버려주세요 기타사항', '동승',
+      '청소 유형', '오염도', '평수', '화장실 수', '붙박이장 내부', '베란다', '복층'
+    ];
+    for (const label of captureLabels) {
+      const v = findLabelValue(lines, [label]);
+      if (v) requests.push(`${label}: ${v}`);
+    }
+
     const knownLabels = [
-      '서비스', '차량', '이사 방식', '일정', '출발지', '도착지', '거리', '짐양', '가구·가전',
+      '서비스', '차량', '이사 방식', '일정', '희망 일정', '출발지', '도착지', '거리', '짐양', '가구·가전',
       '가구·가전 기타사항', '인부', '직접 나르기 어려움', '사다리차', '청소 옵션', '버려주세요',
-      '예상 견적', '홈페이지 예상 견적', '문자 상담 3% 추가 할인 적용 견적', '예약금(20%)', '예약금', '잔금(80%)', '잔금', '이름', '연락처', '전화번호'
+      '예상 견적', '홈페이지 예상 견적', '문자 상담 3% 추가 할인 적용 견적', '예약금(20%)', '예약금', '잔금(80%)', '잔금', '이름', '연락처', '전화번호',
+      ...captureLabels
     ];
     const isKnownLabel = (line) => knownLabels.some((label) => new RegExp(`^${escapeRegExp(label)}\\s*[:：]`).test(line));
 
@@ -108,8 +158,8 @@
     const service = findLabelValue(lines, ['서비스']);
     const vehicle = findLabelValue(lines, ['차량']);
     const move_type = findLabelValue(lines, ['이사 방식']);
-    const scheduleValue = findLabelValue(lines, ['일정']);
-    const { move_date, time_slot_label } = parseSchedule(scheduleValue);
+    const scheduleValue = findLabelValue(lines, ['일정', '희망 일정']);
+    const { move_date, time_slot_label, scheduled_at } = parseSchedule(scheduleValue);
     const from_address = findLabelValue(lines, ['출발지']);
     const to_address = findLabelValue(lines, ['도착지']);
     const distance_km = parseDistanceKm(findLabelValue(lines, ['거리']));
@@ -138,6 +188,7 @@
       move_type,
       move_date,
       time_slot_label,
+      scheduled_at,
       from_address,
       to_address,
       distance_km,
