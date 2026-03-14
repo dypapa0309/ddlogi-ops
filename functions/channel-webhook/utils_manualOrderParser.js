@@ -244,15 +244,11 @@ export function sanitizeJobForDriver(job = {}) {
 export function buildManualJobRow(parsed, { actorUserId } = {}) {
   const nowIso = new Date().toISOString();
   const chat_id = `manual_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+
   return {
-    source: 'manual_paste',
     chat_id,
-    chat_id_hash: crypto.createHash('sha256').update(chat_id, 'utf8').digest('hex'),
-    source_message_id: null,
     status: 'confirmed',
-    status_reason: 'manual_paste_confirmed',
     ops_status: 'open',
-    last_message_at: nowIso,
     customer_name: parsed.customer_name || null,
     customer_phone: parsed.customer_phone || null,
     from_address: parsed.from_address || null,
@@ -260,9 +256,6 @@ export function buildManualJobRow(parsed, { actorUserId } = {}) {
     move_date: parsed.move_date || null,
     time_slot_label: parsed.time_slot_label || null,
     scheduled_at: parsed.scheduled_at || null,
-    quote_amount: parsed.quote_amount ?? null,
-    deposit_amount: parsed.deposit_amount ?? null,
-    balance_amount: parsed.balance_amount ?? null,
     raw_text: parsed.raw_text || null,
     confirmed_at: nowIso,
   };
