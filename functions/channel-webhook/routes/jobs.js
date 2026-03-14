@@ -1,13 +1,13 @@
 // functions/channel-webhook/routes/jobs.js
 import { Router } from "express";
 import { requireRoleJwtFactory } from "../middlewares/adminAuth.js";
+import { parseOrderText, buildManualJobRow, sanitizeJobForDriver } from "../utils_manualOrderParser.js";
 
 export default function jobsRouter({ supabase }) {
   const router = Router();
 
   const requireAdmin = requireRoleJwtFactory({ supabase, allowRoles: ["admin"] });
   const requireAdminOrDriver = requireRoleJwtFactory({ supabase, allowRoles: ["admin", "driver"] });
-  // Separate middleware for driver-only routes
   const requireDriver = requireRoleJwtFactory({ supabase, allowRoles: ["driver"] });
 
   // Admin: list jobs
@@ -33,6 +33,69 @@ export default function jobsRouter({ supabase }) {
     }
   });
 
+  // Admin: paste order text → parse preview only
+  router.post("/manual/parse", requireAdmin, async (req, res) => {
+    try {
+      const rawText = String(req.body?.raw_text || "").trim();
+      if (!rawText) return res.status(400).json({ error: "RAW_TEXT_REQUIRED" });
+      const parsed = parseOrderText(rawText);
+      return res.json({ data: parsed });
+    } catch (e) {
+      return res.status(500).json({ error: e?.message || String(e) });
+    }
+  });
+
+  // Admin: paste order text → save as confirmed/open job
+  router.post("/manual/create", requireAdmin, async (req, res) => {
+    try {
+      const rawText = String(req.body?.raw_text || "").trim();
+      if (!rawText) return res.status(400).json({ error: "RAW_TEXT_REQUIRED" });
+
+      const parsed = parseOrderText(rawText);
+      const jobRow = buildManualJobRow(parsed, { actorUserId: req.user_id });
+
+      const { data, error } = await supabase
+        .from("jobs")
+        .insert(jobRow)
+        .select("*")
+        .maybeSingle();
+
+      if (error) return res.status(500).json({ error: error.message });
+      if (!data) return res.status(500).json({ error: "CREATE_FAILED" });
+
+      await supabase.from("job_events").insert({
+        job_id: data.id,
+        event_type: "manual_created",
+        payload: { actor: req.user_id, source: "manual_paste" },
+      });
+
+      return res.json({ data, parsed });
+    } catch (e) {
+      return res.status(500).json({ error: e?.message || String(e) });
+    }
+  });
+
+  // List open jobs (status=confirmed, ops_status=open|unassigned)
+  router.get("/open", requireAdminOrDriver, async (req, res) => {
+    try {
+      const { data, error } = await supabase
+        .from("jobs")
+        .select("*")
+        .eq("status", "confirmed")
+        .in("ops_status", ["open", "unassigned"])
+        .order("move_date", { ascending: true });
+      if (error) return res.status(500).json({ error: error.message });
+
+      let rows = data || [];
+      if (req.role === "driver") {
+        rows = rows.map((r) => sanitizeJobForDriver(r));
+      }
+      return res.json({ data: rows });
+    } catch (e) {
+      return res.status(500).json({ error: e?.message || String(e) });
+    }
+  });
+
   // Admin/Driver: job detail (drivers only if assigned)
   router.get("/:chatId", requireAdminOrDriver, async (req, res) => {
     try {
@@ -52,7 +115,7 @@ export default function jobsRouter({ supabase }) {
         return res.status(403).json({ error: "FORBIDDEN_ASSIGNEE" });
       }
 
-      return res.json({ data });
+      return res.json({ data: req.role === "driver" ? sanitizeJobForDriver(data) : data });
     } catch (e) {
       return res.status(500).json({ error: e?.message || String(e) });
     }
@@ -68,7 +131,6 @@ export default function jobsRouter({ supabase }) {
 
       const { data: existing, error: exErr } = await supabase
         .from("jobs")
-        // 현재 ops_status도 함께 조회하여 변경 이력을 남길 수 있게 한다.
         .select("id, assigned_driver_id, ops_status")
         .eq("chat_id", chatId)
         .maybeSingle();
@@ -89,7 +151,6 @@ export default function jobsRouter({ supabase }) {
 
       if (error) return res.status(500).json({ error: error.message });
 
-      // ops_status 변경 로그를 남긴다. 기존 상태와 다를 때만 기록한다.
       if (existing && existing.ops_status && existing.ops_status !== ops_status && data && data.id) {
         await supabase.from("job_events").insert({
           job_id: data.id,
@@ -123,36 +184,13 @@ export default function jobsRouter({ supabase }) {
       if (error) return res.status(500).json({ error: error.message });
       if (!data) return res.status(404).json({ error: "NOT_FOUND" });
 
-      await supabase.from("job_events").update({ assigned_driver_id: driver_user_id }).eq("chat_id", chatId);
+      await supabase.from("job_events").insert({
+        job_id: data.id,
+        event_type: "driver_assigned",
+        payload: { actor: req.user_id, assigned_driver_id: driver_user_id },
+      });
 
       return res.json({ data });
-    } catch (e) {
-      return res.status(500).json({ error: e?.message || String(e) });
-    }
-  });
-
-  // List open jobs (status=confirmed, ops_status=open|unassigned)
-  router.get("/open", requireAdminOrDriver, async (req, res) => {
-    try {
-      // Fetch jobs that are confirmed and currently open
-      const { data, error } = await supabase
-        .from("jobs")
-        .select("*")
-        .eq("status", "confirmed")
-        // legacy rows may still have ops_status='unassigned' even after confirmation
-        .in("ops_status", ["open", "unassigned"])
-        .order("move_date", { ascending: true });
-      if (error) return res.status(500).json({ error: error.message });
-      let rows = data || [];
-      // For drivers, mask sensitive information prior to pickup
-      if (req.role === "driver") {
-        rows = rows.map((r) => ({
-          ...r,
-          customer_phone: null,
-          customer_name: null
-        }));
-      }
-      return res.json({ data: rows });
     } catch (e) {
       return res.status(500).json({ error: e?.message || String(e) });
     }
@@ -163,7 +201,7 @@ export default function jobsRouter({ supabase }) {
     try {
       const chatId = String(req.params.chatId || "").trim();
       if (!chatId) return res.status(400).json({ error: "CHAT_ID_REQUIRED" });
-      // Retrieve the job information
+
       const { data: job, error: jobErr } = await supabase
         .from("jobs")
         .select("id,status,ops_status,assigned_driver_id")
@@ -171,11 +209,10 @@ export default function jobsRouter({ supabase }) {
         .maybeSingle();
       if (jobErr) return res.status(500).json({ error: jobErr.message });
       if (!job) return res.status(404).json({ error: "NOT_FOUND" });
-      // Job must be confirmed and open/unassigned to be picked
       if (job.status !== "confirmed" || !["open", "unassigned"].includes(job.ops_status)) {
         return res.status(400).json({ error: "NOT_OPEN" });
       }
-      // Attempt to create an assignment row; rely on DB unique constraint for race conditions
+
       const ins = await supabase.from("driver_assignments").insert({
         job_id: job.id,
         driver_id: req.user_id,
@@ -189,7 +226,7 @@ export default function jobsRouter({ supabase }) {
         }
         return res.status(500).json({ error: ins.error.message });
       }
-      // Update the job to reflect the new assignment and status
+
       const upd = await supabase
         .from("jobs")
         .update({ assigned_driver_id: req.user_id, ops_status: "assigned" })
@@ -197,11 +234,10 @@ export default function jobsRouter({ supabase }) {
       if (upd.error) {
         return res.status(500).json({ error: upd.error.message });
       }
-      // Log the event
+
       await supabase.from("job_events").insert({
         job_id: job.id,
         event_type: "driver_picked",
-        // actor 컬럼이 job_events 테이블에 없으므로 payload 안에 actor 정보를 포함한다.
         payload: { actor: req.user_id }
       });
       return res.json({ data: { picked: true } });

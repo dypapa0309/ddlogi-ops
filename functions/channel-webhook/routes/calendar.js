@@ -3,15 +3,10 @@ import { Router } from "express";
 import { requireRoleJwtFactory } from "../middlewares/adminAuth.js";
 
 function toKstIso(dateStr, timeLabel) {
-  // dateStr: YYYY-MM-DD
-  // timeLabel examples: "오전 10시", "10:00", "오후 3시"
-  // Fallback: 09:00
   const base = `${dateStr}T09:00:00+09:00`;
   if (!timeLabel) return base;
-
   const t = String(timeLabel).trim();
 
-  // "HH:MM"
   const m1 = t.match(/^(\d{1,2}):(\d{2})$/);
   if (m1) {
     const hh = String(m1[1]).padStart(2, "0");
@@ -19,7 +14,6 @@ function toKstIso(dateStr, timeLabel) {
     return `${dateStr}T${hh}:${mm}:00+09:00`;
   }
 
-  // "오전 10시", "오후 3시 30분"
   const m2 = t.match(/^(오전|오후)\s*(\d{1,2})\s*시(?:\s*(\d{1,2})\s*분)?/);
   if (m2) {
     const ap = m2[1];
@@ -32,6 +26,8 @@ function toKstIso(dateStr, timeLabel) {
     return `${dateStr}T${H}:${M}:00+09:00`;
   }
 
+  const m3 = t.match(/^(\d{1,2})시$/);
+  if (m3) return `${dateStr}T${String(m3[1]).padStart(2, "0")}:00:00+09:00`;
   return base;
 }
 
@@ -44,17 +40,25 @@ function addDays(dateStr, days) {
   return `${y}-${m}-${da}`;
 }
 
+function shortText(text, max = 10) {
+  const s = String(text || "-").trim();
+  return s.length > max ? s.slice(0, max) + "…" : s;
+}
+
+function fmtMoney(n) {
+  const v = Number(n);
+  return Number.isFinite(v) ? v.toLocaleString("ko-KR") : "-";
+}
+
 export default function calendarRouter({ supabase }) {
   const router = Router();
   const requireAny = requireRoleJwtFactory({ supabase, allowRoles: ["admin", "driver"] });
 
-  // Calendar events are derived from jobs (single source of truth).
-  // This avoids schema conflicts in job_events and ensures all confirmed jobs appear consistently.
   router.get("/", requireAny, async (req, res) => {
     try {
-      const from = String(req.query.from || "").trim(); // YYYY-MM-DD
-      const to = String(req.query.to || "").trim();     // YYYY-MM-DD
-      const status = String(req.query.status || "").trim(); // optional
+      const from = String(req.query.from || "").trim();
+      const to = String(req.query.to || "").trim();
+      const status = String(req.query.status || "").trim();
 
       if (!from || !to) return res.status(400).json({ error: "FROM_TO_REQUIRED" });
 
@@ -62,17 +66,13 @@ export default function calendarRouter({ supabase }) {
 
       let q = supabase
         .from("jobs")
-        .select("id, chat_id, status, ops_status, move_date, time_slot_label, from_address, to_address, customer_name, assigned_driver_id")
+        .select("id, chat_id, status, ops_status, move_date, time_slot_label, from_address, to_address, customer_name, assigned_driver_id, quote_amount, deposit_amount, balance_amount")
         .gte("move_date", from)
         .lt("move_date", toPlus)
         .order("move_date", { ascending: true });
 
       if (status) q = q.eq("status", status);
-
-      // Driver should only see their assigned jobs
-      if (req.role === "driver") {
-        q = q.eq("assigned_driver_id", req.user_id);
-      }
+      if (req.role === "driver") q = q.eq("assigned_driver_id", req.user_id);
 
       const { data, error } = await q;
       if (error) return res.status(500).json({ error: error.message });
@@ -82,8 +82,11 @@ export default function calendarRouter({ supabase }) {
         .map((j) => {
           const startAt = toKstIso(String(j.move_date), j.time_slot_label);
           const start = new Date(startAt);
-          const end = new Date(start.getTime() + 2 * 60 * 60 * 1000); // default 2h block
-          const title = `${j.customer_name || "고객"} | ${String(j.from_address || "-").slice(0, 18)} → ${String(j.to_address || "-").slice(0, 18)}`;
+          const end = new Date(start.getTime() + 2 * 60 * 60 * 1000);
+          const route = `${shortText(j.from_address)} → ${shortText(j.to_address)}`;
+          const title = req.role === "driver"
+            ? `${route} / 운임 ${fmtMoney(j.balance_amount)}원`
+            : `${route} / 예약 ${fmtMoney(j.deposit_amount)} / 잔금 ${fmtMoney(j.balance_amount)}`;
 
           return {
             id: j.id,

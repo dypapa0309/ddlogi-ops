@@ -143,3 +143,21 @@ body{
 }
 
 .hidden{ display:none !important; }
+.textarea{
+  width:100%;
+  min-height:260px;
+  resize:vertical;
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  line-height:1.55;
+}
+.orderRegPanel{
+  margin-top:16px;
+}
+.regGrid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:12px;
+}
+@media (max-width: 980px){
+  .regGrid{ grid-template-columns:1fr; }
+}

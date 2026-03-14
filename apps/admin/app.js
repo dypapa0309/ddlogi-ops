@@ -27,46 +27,34 @@ function fmtTime(iso){ const d = new Date(iso); return `${pad2(d.getHours())}:${
 function normalizeBase(str) { return String(str || "").trim().replace(/\/+$/, ""); }
 function getApiBase() { return normalizeBase(window.DDLOGI_CONFIG?.apiBaseDefault || ""); }
 
-async function apiGet(path){
+async function apiRequest(path, method = "GET", body){
   const base = getApiBase();
   if (!base) throw new Error("API base missing (config.js apiBaseDefault)");
   const token = await window.DDLOGI_AUTH.getAccessToken();
   if (!token) throw new Error("세션 없음(로그인 필요)");
 
   const res = await fetch(base + path, {
-    method: "GET",
-    headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" }
-  });
-
-  if (res.status === 401) throw new Error("401 (세션 만료/토큰 오류)");
-  if (res.status === 403) throw new Error("403 (권한 또는 CORS)");
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return res.json();
-}
-
-async function apiPatch(path, body){
-  const base = getApiBase();
-  if (!base) throw new Error("API base missing (config.js apiBaseDefault)");
-  const token = await window.DDLOGI_AUTH.getAccessToken();
-  if (!token) throw new Error("세션 없음(로그인 필요)");
-
-  const res = await fetch(base + path, {
-    method: "PATCH",
+    method,
     headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
-    body: JSON.stringify(body || {})
+    body: body ? JSON.stringify(body) : undefined
   });
 
+  const json = await res.json().catch(() => ({}));
   if (res.status === 401) throw new Error("401 (세션 만료/토큰 오류)");
   if (res.status === 403) throw new Error("403 (권한 또는 CORS)");
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return res.json();
+  if (!res.ok) throw new Error(json?.error || `${res.status} ${res.statusText}`);
+  return json;
 }
+const apiGet = (path) => apiRequest(path, "GET");
+const apiPost = (path, body) => apiRequest(path, "POST", body);
+const apiPatch = (path, body) => apiRequest(path, "PATCH", body);
 
 let CUR = new Date();
 let EVENTS = [];
 let SELECTED_DATE = ymd(new Date());
 let DRIVERS = [];
 let SELECTED_EVENT = null;
+let LAST_PARSED = null;
 
 function visibleRangeForMonth(d){
   const first = startOfMonth(d);
@@ -113,10 +101,49 @@ function renderMonth(){
   renderSide();
 }
 
+function fmtMoney(n){
+  if (n == null || n === "") return "-";
+  const v = Number(n);
+  if (!Number.isFinite(v)) return String(n);
+  return v.toLocaleString("ko-KR");
+}
+
+function buildOrderSheet(job){
+  if (job?.raw_text && String(job.raw_text).includes("디디운송")) {
+    return String(job.raw_text).trim();
+  }
+
+  const lines = [];
+  lines.push("디디운송 견적 문의");
+  if (job?.move_date || job?.time_slot_label) lines.push(`일정: ${job.move_date || "-"} / ${job.time_slot_label || "-"}`);
+  if (job?.from_address) lines.push(`출발지: ${job.from_address}`);
+  if (job?.to_address) lines.push(`도착지: ${job.to_address}`);
+  if (job?.customer_phone) lines.push(`전화번호: ${job.customer_phone}`);
+  if (job?.distance_km != null) lines.push(`거리: ${job.distance_km}km`);
+  if (job?.quote_amount != null) lines.push(`예상 견적: ₩${fmtMoney(job.quote_amount)}`);
+  if (job?.deposit_amount != null) lines.push(`예약금(20%): ₩${fmtMoney(job.deposit_amount)}`);
+  if (job?.balance_amount != null) lines.push(`잔금(80%): ₩${fmtMoney(job.balance_amount)}`);
+  lines.push("");
+  lines.push(`status: ${job?.status || "-"}`);
+  lines.push(`ops_status: ${job?.ops_status || "-"}`);
+  return lines.join("\n");
+}
+
 async function loadJobDetail(chatId){
   try {
     const json = await apiGet(`/jobs/${encodeURIComponent(chatId)}`);
-    $("detailBox").textContent = JSON.stringify(json?.data || json, null, 2);
+    const job = json?.data || json;
+    $("detailBox").textContent = buildOrderSheet(job);
+
+    const rawJsonBox = $("rawJsonBox");
+    const btnToggleRaw = $("btnToggleRaw");
+    if (rawJsonBox) rawJsonBox.textContent = JSON.stringify(job, null, 2);
+    if (btnToggleRaw && rawJsonBox) {
+      btnToggleRaw.onclick = () => {
+        const hidden = rawJsonBox.classList.toggle("hidden");
+        btnToggleRaw.textContent = hidden ? "원본(JSON) 보기" : "원본(JSON) 숨기기";
+      };
+    }
   } catch {
     $("detailBox").textContent = "{}";
   }
@@ -188,10 +215,7 @@ async function loadDrivers(){
     DRIVERS = Array.isArray(json?.data) ? json.data : [];
 
     const sel = $("driverSelect");
-    sel.innerHTML =
-      `<option value="">기사 선택</option>` +
-      DRIVERS.map(d => `<option value="${d.user_id}">${(d.name || d.user_id)}</option>`).join("");
-
+    sel.innerHTML = `<option value="">기사 선택</option>` + DRIVERS.map(d => `<option value="${d.user_id}">${(d.name || d.user_id)}</option>`).join("");
     setStatus(`기사 ${DRIVERS.length}명 로드됨`, true);
   } catch (e) {
     setStatus(e?.message || String(e), false);
@@ -204,10 +228,7 @@ async function assignDriver(){
     const driverId = ($("driverSelect")?.value || "").trim();
     if (!driverId) throw new Error("기사 선택 필요");
 
-    await apiPatch(`/jobs/${encodeURIComponent(SELECTED_EVENT.chat_id)}/assign_driver`, {
-      driver_user_id: driverId
-    });
-
+    await apiPatch(`/jobs/${encodeURIComponent(SELECTED_EVENT.chat_id)}/assign_driver`, { driver_user_id: driverId });
     setStatus("기사 배정 완료", true);
     await refresh();
   } catch (e) {
@@ -221,15 +242,76 @@ async function updateOps(){
     const ops = ($("opsSelect")?.value || "").trim();
     if (!ops) throw new Error("ops_status 선택 필요");
 
-    await apiPatch(`/jobs/${encodeURIComponent(SELECTED_EVENT.chat_id)}/ops_status`, {
-      ops_status: ops
-    });
-
+    await apiPatch(`/jobs/${encodeURIComponent(SELECTED_EVENT.chat_id)}/ops_status`, { ops_status: ops });
     setStatus("ops_status 업데이트 완료", true);
     await loadJobDetail(SELECTED_EVENT.chat_id);
   } catch (e) {
     setStatus(e?.message || String(e), false);
   }
+}
+
+function toggleOrderPanel(forceOpen = null) {
+  const panel = $("orderRegPanel");
+  if (!panel) return;
+  const shouldOpen = forceOpen == null ? panel.classList.contains("hidden") : !!forceOpen;
+  panel.classList.toggle("hidden", !shouldOpen);
+  if (shouldOpen) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function renderParsedPreview(parsed) {
+  LAST_PARSED = parsed || null;
+  const parser = window.DDLOGI_ORDER_PARSER;
+  $("orderPreviewAdmin").textContent = parsed ? parser.buildAdminPreviewText(parsed) : "파싱 결과가 여기에 보여.";
+  $("orderPreviewDriver").textContent = parsed ? parser.buildDriverPreviewText(parsed) : "기사에게 노출될 정보만 여기에 보여.";
+}
+
+async function parseOrderTextServer() {
+  try {
+    const rawText = String($("orderRawInput")?.value || "").trim();
+    if (!rawText) throw new Error("주문서를 붙여넣어줘");
+    const json = await apiPost("/jobs/manual/parse", { raw_text: rawText });
+    renderParsedPreview(json?.data || null);
+    setStatus("주문서 파싱 완료", true);
+  } catch (e) {
+    renderParsedPreview(null);
+    setStatus(e?.message || String(e), false);
+  }
+}
+
+async function saveOrderTextServer() {
+  try {
+    const rawText = String($("orderRawInput")?.value || "").trim();
+    if (!rawText) throw new Error("주문서를 붙여넣어줘");
+    if (!LAST_PARSED) await parseOrderTextServer();
+
+    const json = await apiPost("/jobs/manual/create", { raw_text: rawText });
+    const row = json?.data;
+    const parsed = json?.parsed || LAST_PARSED;
+    renderParsedPreview(parsed || null);
+
+    if (parsed?.move_date) {
+      SELECTED_DATE = parsed.move_date;
+      const dt = new Date(parsed.move_date + "T00:00:00");
+      if (!Number.isNaN(dt.getTime())) CUR = new Date(dt.getFullYear(), dt.getMonth(), 1);
+    }
+
+    setStatus(`주문서 저장 완료 (${row?.chat_id || "created"})`, true);
+    await refresh();
+
+    if (row?.chat_id) {
+      SELECTED_EVENT = EVENTS.find((e) => e.chat_id === row.chat_id) || null;
+      await loadJobDetail(row.chat_id);
+      renderSide();
+    }
+  } catch (e) {
+    setStatus(e?.message || String(e), false);
+  }
+}
+
+function clearOrderForm() {
+  $("orderRawInput").value = "";
+  LAST_PARSED = null;
+  renderParsedPreview(null);
 }
 
 async function boot(){
@@ -249,9 +331,13 @@ async function boot(){
   $("btnAssignDriver").onclick = assignDriver;
   $("btnUpdateOps").onclick = updateOps;
 
+  $("btnOrderReg").onclick = () => toggleOrderPanel();
+  $("btnParseOrder").onclick = parseOrderTextServer;
+  $("btnSaveOrder").onclick = saveOrderTextServer;
+  $("btnClearOrder").onclick = clearOrderForm;
+
   await refresh();
 
-  // Bind logout button if present
   const btnLogoutEl = $("btnLogout");
   if (btnLogoutEl) {
     btnLogoutEl.onclick = async () => {

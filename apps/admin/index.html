@@ -20,11 +20,41 @@
         <button id="btnToday" class="btn">오늘</button>
         <button id="btnPrev" class="btn">◀</button>
         <button id="btnNext" class="btn">▶</button>
+        <button id="btnOrderReg" class="btn">주문서 등록</button>
         <button id="btnRefresh" class="btn btn-primary">새로고침</button>
         <button id="btnLogout" class="btn btn-link">로그아웃</button>
       </div>
     </div>
   </header>
+
+  
+
+  <section class="wrap">
+    <section id="orderRegPanel" class="card orderRegPanel hidden">
+      <div class="row between">
+        <div>
+          <div class="sideTitle">주문서 등록</div>
+          <div class="muted small">문자 주문서를 그대로 붙여넣고 파싱 후 저장하면 confirmed/open 상태로 등록돼.</div>
+        </div>
+        <div class="row">
+          <button id="btnParseOrder" class="btn">파싱</button>
+          <button id="btnSaveOrder" class="btn btn-primary">저장</button>
+          <button id="btnClearOrder" class="btn">초기화</button>
+        </div>
+      </div>
+      <textarea id="orderRawInput" class="input textarea mt10" placeholder="문자 주문서를 여기에 그대로 붙여넣어줘"></textarea>
+      <div class="regGrid mt10">
+        <div>
+          <div class="muted small">관리자 미리보기</div>
+          <pre id="orderPreviewAdmin" class="debugBox mt10">파싱 결과가 여기에 보여.</pre>
+        </div>
+        <div>
+          <div class="muted small">기사 미리보기</div>
+          <pre id="orderPreviewDriver" class="debugBox mt10">기사에게 노출될 정보만 여기에 보여.</pre>
+        </div>
+      </div>
+    </section>
+  </section>
 
   <main class="wrap grid2">
     <section class="card">
@@ -54,7 +84,11 @@
       <div class="divider"></div>
 
       <div class="muted small">선택한 이벤트 상세</div>
+      <div class="row mt10" style="justify-content:flex-end; gap:8px;">
+        <button id="btnToggleRaw" class="btn ghost">원본(JSON) 보기</button>
+      </div>
       <pre id="detailBox" class="debugBox mt10">{}</pre>
+      <pre id="rawJsonBox" class="debugBox mt10 hidden">{}</pre>
 
       <div class="divider"></div>
 
@@ -88,6 +122,7 @@
   <script src="/config.js"></script>
   <script src="/shared/supabase-client.js"></script>
   <script src="/shared/auth.js"></script>
+  <script src="/shared/parser/orderParser.js"></script>
   <script src="/apps/admin/app.js"></script>
 </body>
 </html>

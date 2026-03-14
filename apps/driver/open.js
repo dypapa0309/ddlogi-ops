@@ -1,5 +1,4 @@
 // apps/driver/open.js
-
 const $ = (id) => document.getElementById(id);
 
 function setConn(ok, text) {
@@ -16,47 +15,38 @@ function setStatus(msg, ok = true) {
   el.className = 'hint ' + (ok ? 'ok' : 'bad');
 }
 
+function fmtMoney(n){
+  const v = Number(n);
+  return Number.isFinite(v) ? v.toLocaleString('ko-KR') : '-';
+}
+
 function normalizeBase(str) {
-  return String(str || '').trim().replace(/\/+/g, '/').replace(/\/$/, '');
+  return String(str || '').trim().replace(/\/+$/, '');
 }
 
 function getApiBase() {
   return normalizeBase(window.DDLOGI_CONFIG?.apiBaseDefault || '');
 }
 
-async function apiGet(path) {
+async function apiRequest(path, method = 'GET', body) {
   const base = getApiBase();
   if (!base) throw new Error('API base missing (config.js apiBaseDefault)');
   const token = await window.DDLOGI_AUTH.getAccessToken();
   if (!token) throw new Error('세션 없음(로그인 필요)');
   const res = await fetch(base + path, {
-    method: 'GET',
-    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }
-  });
-  if (res.status === 401) throw new Error('401 (세션 만료/토큰 오류)');
-  if (res.status === 403) throw new Error('403 (권한 또는 CORS)');
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return res.json();
-}
-
-async function apiPost(path, body) {
-  const base = getApiBase();
-  if (!base) throw new Error('API base missing (config.js apiBaseDefault)');
-  const token = await window.DDLOGI_AUTH.getAccessToken();
-  if (!token) throw new Error('세션 없음(로그인 필요)');
-  const res = await fetch(base + path, {
-    method: 'POST',
+    method,
     headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body || {})
+    body: body ? JSON.stringify(body) : undefined
   });
   const json = await res.json().catch(() => ({}));
   if (res.status === 401) throw new Error('401 (세션 만료/토큰 오류)');
   if (res.status === 403) throw new Error('403 (권한 또는 CORS)');
-  if (!res.ok) {
-    throw new Error(json?.error || `${res.status} ${res.statusText}`);
-  }
+  if (!res.ok) throw new Error(json?.error || `${res.status} ${res.statusText}`);
   return json;
 }
+
+const apiGet = (path) => apiRequest(path, 'GET');
+const apiPost = (path, body) => apiRequest(path, 'POST', body);
 
 async function loadOpenJobs() {
   try {
@@ -76,21 +66,23 @@ async function loadOpenJobs() {
       return;
     }
     rows.forEach((job) => {
+      const parser = window.DDLOGI_ORDER_PARSER;
+      const parsed = parser?.parseOrderText ? parser.parseOrderText(job.raw_text || '') : null;
       const card = document.createElement('div');
       card.className = 'card mt10';
       card.innerHTML =
         '<div class="row between">' +
-        '<div>' +
-        '<div><strong>' + (job.move_date || '') + '</strong></div>' +
-        '<div class="small">' + (job.from_address || '') + ' → ' + (job.to_address || '') + '</div>' +
-        '</div>' +
-        '<div class="row gap10">' +
-        '<button class="btn btn-primary" data-chat-id="' + job.chat_id + '">픽업</button>' +
-        '</div>' +
+          '<div>' +
+            '<div><strong>' + (job.move_date || parsed?.move_date || '') + ' / ' + (job.time_slot_label || parsed?.time_slot_label || '-') + '</strong></div>' +
+            '<div class="small">' + (job.from_address || parsed?.from_address || '') + ' → ' + (job.to_address || parsed?.to_address || '') + '</div>' +
+            '<div class="small muted" style="margin-top:6px;">짐양: ' + (parsed?.load_text || '-') + ' · 운임비: ₩' + fmtMoney(job.balance_amount) + '</div>' +
+          '</div>' +
+          '<div class="row gap10">' +
+            '<button class="btn btn-primary" data-chat-id="' + job.chat_id + '">픽업</button>' +
+          '</div>' +
         '</div>';
       list.appendChild(card);
     });
-    // Attach pick handlers
     list.querySelectorAll('button[data-chat-id]').forEach((btn) => {
       btn.onclick = async (e) => {
         const chatId = e.currentTarget.getAttribute('data-chat-id');
@@ -126,7 +118,6 @@ async function boot() {
     return;
   }
   $('#btnRefresh').onclick = loadOpenJobs;
-  // Logout handler
   const btnLogoutEl = $('btnLogout');
   if (btnLogoutEl) {
     btnLogoutEl.onclick = async () => {
